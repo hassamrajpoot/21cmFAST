@@ -7,6 +7,8 @@ import py21cmfast as p21c
 
 
 @pytest.mark.parametrize("source_model", ["L-INTEGRAL", "E-INTEGRAL"])
+@pytest.mark.filterwarnings("ignore:^You are setting R_BUBBLE_MAX:UserWarning")
+@pytest.mark.filterwarnings("ignore:^The maximum halo mass:UserWarning")
 def test_minimize_memory_on_global_evolution(source_model: str):
     """Test that switching minimize memory on/off doesn't change outputs.
 

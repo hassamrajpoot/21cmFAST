@@ -18,6 +18,19 @@ from py21cmfast import (
 from py21cmfast.wrapper import outputs as ox
 from py21cmfast.wrapper.arrays import Array
 
+pytestmark = [
+    pytest.mark.filterwarnings(
+        "ignore:^USE_MINI_HALOS is False but V_CB_MODEL:UserWarning"
+    ),
+    pytest.mark.filterwarnings(
+        "ignore:^USE_MINI_HALOS needs a non-trivial V_CB_MODEL:UserWarning"
+    ),
+    pytest.mark.filterwarnings("ignore:^You are setting R_BUBBLE_MAX:UserWarning"),
+    pytest.mark.filterwarnings(
+        "ignore:^You are setting M_TURN_STELLAR_FEEDBACK:UserWarning"
+    ),
+]
+
 
 @pytest.fixture
 def init(default_input_struct: InputParameters):
@@ -269,8 +282,8 @@ def test_optional_field_halobox(default_input_struct_lc: InputParameters):
 
 
 def test_optional_field_xrs(default_input_struct_lc: InputParameters):
-    """Ensure that the correct XraySourceBox fields are set based on the parameters."""
-    xr = ox.XraySourceBox.new(redshift=0.0, inputs=default_input_struct_lc)
+    """Ensure that the correct RadiationFields are set based on the parameters."""
+    xr = ox.RadiationFields.new(redshift=0.0, inputs=default_input_struct_lc)
     assert isinstance(xr.filtered_sfr, Array)
     assert isinstance(xr.filtered_xray, Array)
     assert xr.filtered_sfr_mini is None
@@ -280,7 +293,7 @@ def test_optional_field_xrs(default_input_struct_lc: InputParameters):
         USE_MINI_HALOS=True,
         RECOMB_MODEL="inhomogeneous",
     )
-    xr = ox.XraySourceBox.new(redshift=0.0, inputs=inputs)
+    xr = ox.RadiationFields.new(redshift=0.0, inputs=inputs)
     assert isinstance(xr.filtered_sfr_mini, Array)
 
 

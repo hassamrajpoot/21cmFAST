@@ -1223,24 +1223,30 @@ class HaloBox(OutputStructZ):
 
 
 @attrs.define(slots=False, kw_only=True)
-class XraySourceBox(OutputStructZ):
+class RadiationFields(OutputStructZ):
     """A class containing the filtered sfr grids."""
 
     _meta = False
-    _c_compute_function = lib.UpdateXraySourceBox
+    _c_compute_function = lib.UpdateRadiationFields
 
     filtered_sfr = _arrayfield()
     filtered_sfr_mini = _arrayfield(optional=True)
     filtered_xray = _arrayfield()
     filtered_sfr_lw = _arrayfield(optional=True)
     filtered_sfr_mini_lw = _arrayfield(optional=True)
-    mean_sfr = _arrayfield()
-    mean_sfr_mini = _arrayfield(optional=True)
+    xray_heating_rate = _arrayfield(optional=True)
+    xray_ionization_rate = _arrayfield()
+    xray_lya_flux = _arrayfield()
+    lya_flux_continuum_injected = _arrayfield(optional=True)
+    lyw_flux = _arrayfield(optional=True)
+    lya_flux_continuum = _arrayfield(optional=True)
+    lya_flux_injected = _arrayfield(optional=True)
     mean_log10_Mcrit_LW = _arrayfield(optional=True)
+    Q_HI: float = attrs.field(default=1.0)
 
     @classmethod
     def new(cls, inputs: InputParameters, redshift: float, **kw) -> Self:
-        """Create a new XraySourceBox instance with the given inputs.
+        """Create a new RadiationFields instance with the given inputs.
 
         Parameters
         ----------
@@ -1251,36 +1257,41 @@ class XraySourceBox(OutputStructZ):
 
         Other Parameters
         ----------------
-        All other parameters are passed through to the :class:`XraySourceBox`
+        All other parameters are passed through to the :class:`RadiationFields`
         constructor.
         """
-        shape = (
-            (inputs.astro_params.N_STEP_TS,)
-            + (inputs.simulation_options.HII_DIM,) * 2
-            + (
-                int(
-                    inputs.simulation_options.NON_CUBIC_FACTOR
-                    * inputs.simulation_options.HII_DIM
-                ),
-            )
+        shape = (inputs.simulation_options.HII_DIM,) * 2 + (
+            int(
+                inputs.simulation_options.NON_CUBIC_FACTOR
+                * inputs.simulation_options.HII_DIM
+            ),
         )
 
+        # TODO: the 3D arrays below are defined as np.float64, but should be np.float32 - see https://github.com/21cmfast/21cmFAST/issues/744
         out = {
             "filtered_sfr": Array(shape, dtype=np.float32),
             "filtered_xray": Array(shape, dtype=np.float32),
-            "mean_sfr": Array((inputs.astro_params.N_STEP_TS,), dtype=np.float64),
+            "xray_ionization_rate": Array(shape, dtype=np.float64),
+            "xray_lya_flux": Array(shape, dtype=np.float64),
         }
         if inputs.astro_options.USE_MINI_HALOS:
             out["filtered_sfr_mini"] = Array(shape, dtype=np.float32)
-            out["mean_sfr_mini"] = Array(
-                (inputs.astro_params.N_STEP_TS,), dtype=np.float64
-            )
             out["mean_log10_Mcrit_LW"] = Array(
                 (inputs.astro_params.N_STEP_TS,), dtype=np.float64
             )
+            out["lyw_flux"] = Array(shape, dtype=np.float64)
             if inputs.astro_options.LYA_MULTIPLE_SCATTERING:
                 out["filtered_sfr_lw"] = Array(shape, dtype=np.float32)
                 out["filtered_sfr_mini_lw"] = Array(shape, dtype=np.float32)
+
+        if inputs.astro_options.USE_X_RAY_HEATING:
+            out["xray_heating_rate"] = Array(shape, dtype=np.float64)
+
+        if inputs.astro_options.USE_LYA_HEATING:
+            out["lya_flux_continuum"] = Array(shape, dtype=np.float64)
+            out["lya_flux_injected"] = Array(shape, dtype=np.float64)
+        else:
+            out["lya_flux_continuum_injected"] = Array(shape, dtype=np.float64)
 
         return cls(
             inputs=inputs,
@@ -1292,32 +1303,60 @@ class XraySourceBox(OutputStructZ):
     def get_required_input_arrays(self, input_box: OutputStruct) -> list[str]:
         """Return all input arrays required to compute this object."""
         required = []
-        if not isinstance(input_box, HaloBox):
-            raise ValueError(f"{type(input_box)} is not an input required for HaloBox!")
+        if isinstance(input_box, InitialConditions):
+            if (
+                self.matter_options.V_CB_MODEL == "FLUCTS"
+                and self.astro_options.USE_MINI_HALOS
+            ):
+                required += ["lowres_vcb"]
+        elif isinstance(input_box, PerturbedField):
+            required += ["density"]
+        elif isinstance(input_box, TsBox):
+            required += ["xray_ionised_fraction"]
+            if self.astro_options.USE_MINI_HALOS:
+                required += ["J_21_LW"]
+        elif isinstance(input_box, HaloBox):
+            required += ["halo_sfr", "halo_xray"]
+            if self.astro_options.USE_MINI_HALOS:
+                required += ["halo_sfr_mini"]
+        else:
+            raise ValueError(
+                f"{type(input_box)} is not an input required for RadiationFields!"
+            )
 
-        required += ["halo_sfr", "halo_xray"]
-        if self.astro_options.USE_MINI_HALOS:
-            required += ["halo_sfr_mini"]
         return required
 
     def compute(
         self,
         *,
+        redshift,
         halobox: HaloBox,
         R_inner,
         R_outer,
         R_ct,
         R_star,
+        mode,
+        cleanup,
+        perturbed_field: PerturbedField,
+        previous_spin_temp: TsBox,
+        initial_conditions: InitialConditions,
         allow_already_computed: bool = False,
     ):
         """Compute the function."""
         return self._compute(
             allow_already_computed,
+            redshift,
             halobox,
             R_inner,
             R_outer,
             R_ct,
             R_star,
+            mode,
+            cleanup,
+            perturbed_field.redshift,
+            perturbed_field,
+            previous_spin_temp,
+            initial_conditions,
         )
 
 
@@ -1415,15 +1454,26 @@ class TsBox(OutputStructZ):
             ]
             if self.astro_options.USE_MINI_HALOS:
                 required += ["J_21_LW"]
-        elif isinstance(input_box, XraySourceBox):
+        elif isinstance(input_box, RadiationFields):
             if self.matter_options.lagrangian_source_grid:
                 required += ["filtered_sfr", "filtered_xray"]
                 if self.astro_options.USE_MINI_HALOS:
                     required += ["filtered_sfr_mini"]
+            else:
+                required += [
+                    "xray_ionization_rate",
+                    "xray_lya_flux",
+                ]
+                if self.astro_options.USE_X_RAY_HEATING:
+                    required += ["xray_heating_rate"]
+                if self.astro_options.USE_MINI_HALOS:
+                    required += ["lyw_flux"]
+                if self.astro_options.USE_LYA_HEATING:
+                    required += ["lya_flux_continuum", "lya_flux_injected"]
+                else:
+                    required += ["lya_flux_continuum_injected"]
         else:
-            raise ValueError(
-                f"{type(input_box)} is not an input required for PerturbedHaloCatalog!"
-            )
+            raise ValueError(f"{type(input_box)} is not an input required for TsBox!")
 
         return required
 
@@ -1432,7 +1482,7 @@ class TsBox(OutputStructZ):
         *,
         cleanup: bool,
         perturbed_field: PerturbedField,
-        xray_source_box: XraySourceBox,
+        radiation_fields: RadiationFields,
         prev_spin_temp: TsBox,
         ics: InitialConditions,
         allow_already_computed: bool = False,
@@ -1445,7 +1495,7 @@ class TsBox(OutputStructZ):
             perturbed_field.redshift,
             cleanup,
             perturbed_field,
-            xray_source_box,
+            radiation_fields,
             prev_spin_temp,
             ics,
         )

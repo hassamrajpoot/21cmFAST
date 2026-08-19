@@ -64,17 +64,26 @@ typedef struct HaloBox {
     double log10_Mcrit_MCG_ave;
 } HaloBox;
 
-typedef struct XraySourceBox {
+typedef struct RadiationFields {
     float *filtered_sfr;
     float *filtered_xray;
     float *filtered_sfr_mini;
     float *filtered_sfr_lw;
     float *filtered_sfr_mini_lw;
 
+    // TODO: these arrays are defined as double, but should be float - see
+    // https://github.com/21cmfast/21cmFAST/issues/744
+    double *xray_heating_rate;
+    double *xray_ionization_rate;
+    double *xray_lya_flux;
+    double *lya_flux_continuum_injected;
+    double *lya_flux_continuum;
+    double *lya_flux_injected;
+    double *lyw_flux;
+
     double *mean_log10_Mcrit_LW;
-    double *mean_sfr;
-    double *mean_sfr_mini;
-} XraySourceBox;
+    double Q_HI;
+} RadiationFields;
 
 typedef struct TsBox {
     float *spin_temperature;

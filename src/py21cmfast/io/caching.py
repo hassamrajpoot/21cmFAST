@@ -296,7 +296,7 @@ class RunCache:
     BrightnessTemp: dict[float, Path] = _dict_of_paths_field()
     HaloBox: dict[float, Path] | None = _dict_of_paths_field()
     HaloCatalog: dict[float, Path] | None = _dict_of_paths_field()
-    XraySourceBox: dict[float, Path] | None = _dict_of_paths_field()
+    RadiationFields: dict[float, Path] | None = _dict_of_paths_field()
     inputs: InputParameters | None = attrs.field(default=None)
 
     @classmethod
@@ -332,7 +332,7 @@ class RunCache:
         if inputs.astro_options.USE_TS_FLUCT:
             others |= {"TsBox": {}}
         if inputs.matter_options.lagrangian_source_grid:
-            others |= {"XraySourceBox": {}, "HaloBox": {}}
+            others |= {"RadiationFields": {}, "HaloBox": {}}
         if inputs.matter_options.has_discrete_halos:
             others |= {"HaloCatalog": {}}
 
@@ -547,7 +547,7 @@ class CacheConfigUpdate(TypedDict, total=False):
     brightness_temp: bool
     halobox: bool
     halo_catalog: bool
-    xray_source_box: bool
+    radiation_fields: bool
 
 
 @attrs.define
@@ -561,7 +561,7 @@ class CacheConfig:
     brightness_temp: bool = attrs.field(default=True, converter=bool)
     halobox: bool = attrs.field(default=True, converter=bool)
     halo_catalog: bool = attrs.field(default=True, converter=bool)
-    xray_source_box: bool = attrs.field(default=True, converter=bool)
+    radiation_fields: bool = attrs.field(default=True, converter=bool)
 
     def update(self, **kwargs: Unpack[CacheConfigUpdate]) -> Self:
         """Return a new CacheConfig with the given fields updated."""
@@ -583,7 +583,7 @@ class CacheConfig:
             brightness_temp=False,
             halobox=False,
             halo_catalog=False,
-            xray_source_box=False,
+            radiation_fields=False,
         ).update(**kwargs)
 
     @classmethod
@@ -597,7 +597,7 @@ class CacheConfig:
             brightness_temp=False,
             halobox=False,
             halo_catalog=True,
-            xray_source_box=False,
+            radiation_fields=False,
         ).update(**kwargs)
 
     @classmethod
@@ -606,7 +606,7 @@ class CacheConfig:
 
         This represents the minimum caching setup which will *never* store every redshift in memory.
         PerturbedField and PerturbedHaloCatalogs are all calculated at the start of the run, and HaloBox
-        is required at multiple redshifts for the XraySourceBox. So this caching setup allows free
+        is required at multiple redshifts for RadiationFields. So this caching setup allows free
         purging of these objects without losing data.
         """
         return cls(
@@ -617,5 +617,5 @@ class CacheConfig:
             brightness_temp=False,
             halobox=True,
             halo_catalog=True,
-            xray_source_box=False,
+            radiation_fields=False,
         ).update(**kwargs)

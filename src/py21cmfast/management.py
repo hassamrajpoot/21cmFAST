@@ -20,7 +20,9 @@ def get_expected_outputs(
     if inputs.matter_options.lagrangian_source_grid:
         out["HaloBox"] = ostrct.HaloBox.new(inputs, redshift=6).arrays
         if inputs.astro_options.USE_TS_FLUCT:
-            out["XraySourceBox"] = ostrct.XraySourceBox.new(inputs, redshift=6).arrays
+            out["RadiationFields"] = ostrct.RadiationFields.new(
+                inputs, redshift=6
+            ).arrays
 
     if inputs.matter_options.has_discrete_halos:
         out["HaloCatalog"] = ostrct.HaloCatalog.new(inputs, redshift=6).arrays
@@ -45,8 +47,8 @@ def get_expected_outputs(
         del out["HaloBox"]
     if not cache_config.spin_temp and "TsBox" in out:
         del out["TsBox"]
-    if not cache_config.xray_source_box and "XraySourceBox" in out:
-        del out["XraySourceBox"]
+    if not cache_config.radiation_fields and "RadiationFields" in out:
+        del out["RadiationFields"]
 
     return out
 

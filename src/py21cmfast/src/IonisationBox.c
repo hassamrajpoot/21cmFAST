@@ -637,7 +637,8 @@ void copy_filter_transform(struct FilteredGrids *fg_struct, struct IonBoxConstan
             filter_box(fg_struct->N_rec_filtered, box_dim, consts->hii_filter, R, 0., 0.);
         }
         if (consts->lagrangian_source_grids) {
-            int filter_hf = astro_options_global->USE_EXP_FILTER ? 3 : consts->hii_filter;
+            int filter_hf =
+                astro_options_global->USE_EXP_FILTER ? FILTER_EXP_MFP : consts->hii_filter;
             filter_box(fg_struct->stars_filtered, box_dim, filter_hf, R, consts->mfp_meandens, 0.);
             if (uses_recombination(astro_options_global->RECOMB_MODEL)) {
                 filter_box(fg_struct->sfr_filtered, box_dim, filter_hf, R, consts->mfp_meandens,

@@ -383,7 +383,7 @@ int ComputeHaloCatalog(float redshift_desc, float redshift, InitialConditions *b
                          simulation_options_global->N_THREADS, density_field);
             if (simulation_options_global->DIM != simulation_options_global->HII_DIM) {
                 // the tophat filter here will smoothe the grid to HII_DIM
-                filter_box(density_field, box_dim, 0,
+                filter_box(density_field, box_dim, FILTER_TOPHAT,
                            physconst.l_factor * simulation_options_global->BOX_LEN /
                                (simulation_options_global->HII_DIM + 0.0),
                            0., 0.);

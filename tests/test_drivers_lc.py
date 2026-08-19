@@ -5,6 +5,7 @@ They do not test for correctness of simulations, but whether different parameter
 options work/don't work as intended.
 """
 
+import deprecation
 import numpy as np
 import pytest
 
@@ -25,17 +26,15 @@ def test_lightcone(
 def test_lightcone_quantities(
     ic, default_input_struct_lc, lightcone_min_redshift, max_redshift, cache
 ):
-    lcn = p21c.RectilinearLightconer.with_equal_cdist_slices(
-        min_redshift=lightcone_min_redshift,
-        max_redshift=max_redshift,
-        resolution=ic.simulation_options.cell_size,
-        cosmo=ic.cosmo_params.cosmo,
-        quantities=(
-            "density",
-            "brightness_temp",
-            "ionisation_rate_G12",
-        ),
-    )
+    with pytest.warns(
+        deprecation.DeprecatedWarning, match="with_equal_cdist_slices is deprecated"
+    ):
+        lcn = p21c.RectilinearLightconer.with_equal_cdist_slices(
+            min_redshift=2.0,
+            max_redshift=max_redshift,
+            resolution=ic.simulation_options.cell_size,
+            cosmo=ic.cosmo_params.cosmo,
+        )
 
     lc = p21c.run_lightcone(
         lightconer=lcn,
@@ -130,6 +129,7 @@ def test_run_lc_bad_inputs(
         )
 
 
+@pytest.mark.filterwarnings("ignore:^The cache at OutputCache:UserWarning")
 def test_lc_with_lightcone_filename(
     ic, rectlcn, default_input_struct_lc, tmpdirec, cache
 ):
@@ -231,12 +231,15 @@ def test_lc_lowerz_than_photon_cons(
         ),
         astro_options=default_astro_options.clone(PHOTON_CONS_TYPE="z-photoncons"),
     )
-    lcn = p21c.RectilinearLightconer.with_equal_cdist_slices(
-        min_redshift=2.0,
-        max_redshift=max_redshift,
-        resolution=ic.simulation_options.cell_size,
-        cosmo=ic.cosmo_params.cosmo,
-    )
+    with pytest.warns(
+        deprecation.DeprecatedWarning, match="with_equal_cdist_slices is deprecated"
+    ):
+        lcn = p21c.RectilinearLightconer.with_equal_cdist_slices(
+            min_redshift=2.0,
+            max_redshift=max_redshift,
+            resolution=ic.simulation_options.cell_size,
+            cosmo=ic.cosmo_params.cosmo,
+        )
 
     with pytest.raises(ValueError, match="You have passed a redshift"):
         p21c.run_lightcone(

@@ -17,6 +17,12 @@ from py21cmfast import (
 from py21cmfast.io import caching, h5
 from py21cmfast.wrapper import outputs
 
+pytestmark = [
+    pytest.mark.filterwarnings("ignore:^Resolution is likely too low:UserWarning"),
+    pytest.mark.filterwarnings("ignore:^The maximum halo mass:UserWarning"),
+    pytest.mark.filterwarnings("ignore:^Your R_BUBBLE_MAX is > BOX_LEN:UserWarning"),
+]
+
 
 def create_full_run_cache(cachedir: Path) -> caching.RunCache:
     inputs = InputParameters.from_template(
@@ -81,7 +87,7 @@ class TestCacheConfig:
         fields = attrs.fields(caching.CacheConfig)
 
         # Annoying fields that we don't want to cache
-        annoying_fields = ["xray_source_box", "initial_conditions"]
+        annoying_fields = ["radiation_fields", "initial_conditions"]
         kwargs = dict.fromkeys(annoying_fields, False)
 
         # First check that the update method works as expected
@@ -121,7 +127,7 @@ class TestRunCache:
         assert isinstance(cache.IonizedBox, dict)
         assert isinstance(cache.BrightnessTemp, dict)
         assert isinstance(cache.TsBox, dict)
-        assert isinstance(cache.XraySourceBox, dict)
+        assert isinstance(cache.RadiationFields, dict)
 
         assert len(cache.HaloBox) == len(inputs.node_redshifts)
 

@@ -17,7 +17,7 @@ int ComputePerturbedHaloCatalog(float redshift, InitialConditions *boxes, TsBox 
                                 PerturbedHaloCatalog *halos_perturbed);
 
 int ComputeTsBox(float redshift, float prev_redshift, float perturbed_field_redshift, short cleanup,
-                 PerturbedField *perturbed_field, XraySourceBox *source_box,
+                 PerturbedField *perturbed_field, RadiationFields *radiation_fields,
                  TsBox *previous_spin_temp, InitialConditions *ini_boxes, TsBox *this_spin_temp);
 
 int ComputeIonizedBox(float redshift, float prev_redshift, PerturbedField *perturbed_field,
@@ -31,8 +31,11 @@ int ComputeBrightnessTemp(float redshift, TsBox *spin_temp, IonizedBox *ionized_
 int ComputeHaloBox(double redshift, InitialConditions *ini_boxes, HaloCatalog *halos,
                    TsBox *previous_spin_temp, IonizedBox *previous_ionize_box, HaloBox *grids);
 
-int UpdateXraySourceBox(HaloBox *halobox, double R_inner, double R_outer, int R_ct, double R_star,
-                        XraySourceBox *source_box);
+int UpdateRadiationFields(float redshift, HaloBox *halobox, double R_inner, double R_outer,
+                          int R_ct, double R_star, short mode, short cleanup,
+                          float perturbed_field_redshift, PerturbedField *perturbed_field,
+                          TsBox *previous_spin_temp, InitialConditions *ini_boxes,
+                          RadiationFields *radiation_fields);
 /*--------------------------*/
 
 /* PHOTON CONSERVATION MODEL FUNCTIONS */

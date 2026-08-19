@@ -23,8 +23,8 @@ from ..wrapper.outputs import (
     IonizedBox,
     PerturbedField,
     PerturbedHaloCatalog,
+    RadiationFields,
     TsBox,
-    XraySourceBox,
 )
 from ._global_initialization import init_c_state
 from ._param_config import (
@@ -33,6 +33,12 @@ from ._param_config import (
 )
 
 logger = logging.getLogger(__name__)
+
+update_rad_fields_mode = {
+    "setup": 0,
+    "eval": 1,
+    "cleanup": 2,
+}
 
 
 @single_field_func
@@ -379,10 +385,13 @@ def compute_halo_grid(
 
 
 # TODO: make this more general and probably combine with the lightcone interp function
+# TODO: remove the need_c argument, this is currently required because we call this function once for just computing the history of
+# log10_Mcrit_MCG_ave - see other comment about this in need_c.
 def interp_halo_boxes(
     halo_boxes: list[HaloBox],
-    fields: list[str],
+    interp_fields: list[str],
     redshift: float,
+    need_c: bool,
 ) -> HaloBox:
     """
     Interpolate HaloBox history to the desired redshift.
@@ -396,10 +405,12 @@ def interp_halo_boxes(
     ----------
     halo_boxes : list of HaloBox instances
         The halobox history to be interpolated
-    fields: List of Strings
+    interp_fields: list[str]
         The properties of the haloboxes to be interpolated
     redshift : float
         The desired redshift of interpolation
+    need_c : bool
+        Whether we need to compute the radiation field boxes in the C code or not.
 
     Returns
     -------
@@ -415,8 +426,8 @@ def interp_halo_boxes(
         raise ValueError(f"Invalid z_target {redshift} for redshift array {z_halos}")
 
     # If we do global evolution, no need to do that
-    if inputs.simulation_options.HII_DIM > 1:
-        arr_fields = [f for f in fields if f in halo_boxes[0].arrays]
+    if inputs.simulation_options.HII_DIM > 1 and need_c:
+        arr_fields = [f for f in interp_fields if f in halo_boxes[0].arrays]
         computed = [box.ensure_arrays_computed(*arr_fields) for box in halo_boxes]
         if not all(computed):
             raise ValueError("Some of the HaloBox fields required are not computed")
@@ -434,7 +445,7 @@ def interp_halo_boxes(
     interp_param = (redshift - z_desc) / (z_prog - z_desc)
 
     # If we do global evolution, no need to do that
-    if inputs.simulation_options.HII_DIM > 1:
+    if inputs.simulation_options.HII_DIM > 1 and need_c:
         # I set the box redshift to be the stored one so it is read properly into the ionize box
         # for the xray source it doesn't matter, also since it is not _compute()'d, it won't be cached
         check_output_consistency(
@@ -449,13 +460,14 @@ def interp_halo_boxes(
     hbox_out = HaloBox.new(redshift=redshift, inputs=inputs)
 
     # initialise the memory
-    hbox_out._init_arrays()
+    if need_c:
+        hbox_out._init_arrays()
 
     # interpolate halo boxes in gridded SFR
     hbox_prog = halo_boxes[idx_prog]
     hbox_desc = halo_boxes[idx_desc]
 
-    for field in fields:
+    for field in interp_fields:
         field_desc = hbox_desc.get(field)
         field_prog = hbox_prog.get(field)
         interp_field = np.zeros_like(field_desc)
@@ -465,40 +477,158 @@ def interp_halo_boxes(
     return hbox_out
 
 
-# NOTE: the current implementation of this box is very hacky, since I have trouble figuring out a way to _compute()
-#   over multiple redshifts in a nice way using this wrapper.
-# TODO: if we move some code to jax or similar I think this would be one of the first candidates (just filling out some filtered grids)
-@single_field_func
-@init_c_state(broadcast_inputs=True)
-def compute_xray_source_field(
-    *,
-    initial_conditions: InitialConditions,
-    hboxes: list[HaloBox],
+# TODO: I gave this function an initializer decorator since it can call the C code, and if some curious users will try to
+# call it directly they will run into segfaul. Also here, I set the argument to be sigma=True, but this is an "overkill"
+# and should be set to broadcast_inputs=True once https://github.com/21cmfast/21cmFAST/issues/668 is fixed.
+# TODO: perturbed_field and initial_conditions should be removed from the function's signature once
+# https://github.com/21cmfast/21cmFAST/issues/668 is fixed.
+@init_c_state(sigma=True)
+def _interpolate_and_evaluate_radiation_fields(
     redshift: float,
-    previous_ionize_box: IonizedBox | None = None,
-) -> XraySourceBox:
-    r"""
-    Compute filtered grid of SFR for use in spin temperature calculation.
-
-    This will filter over the halo history in annuli, computing the contribution to the
-    SFR density
-
-    If no halo field is passed one is calculated at the desired redshift as if it is the
-    first box.
+    inputs: InputParameters,
+    hboxes: list[HaloBox],
+    interp_fields: list[str],
+    R_range: np.ndarray,
+    zpp_avg: np.ndarray,
+    z_max: float,
+    need_c: bool,
+    radiation_fields: RadiationFields,
+    perturbed_field: PerturbedField | None = None,
+    previous_spin_temp: TsBox | None = None,
+    initial_conditions: InitialConditions | None = None,
+    cleanup: bool | None = None,
+    R_star: float | None = None,
+) -> RadiationFields:
+    """
+    Interpolate the halo boxes and evaluate the radiation fields.
 
     Parameters
     ----------
-    initial_conditions : :class:`~InitialConditions`
-        The initial conditions of the run. The user and cosmo params
+    redshift: float
+        The redshift at which to evaluate the radiation fields.
+    inputs: InputParameters
+        The input parameters specifying the run.
+    hboxes: list of HaloBox
+        The halo boxes to interpolate.
+    interp_fields : list[str]
+        The fields to interpolate and evaluate.
+    R_range: np.ndarray
+        The range of shell's radii to be integrated in order to evaluate the radiation fields.
+    zpp_avg: np.ndarray
+        The average redshifts for each shell.
+    z_max: float
+        The maximum redshift for the integration.
+        If a shell crosses this redshift, its contribution to the radiation fields is ignored.
+    need_c: bool
+        Whether to evaluate the 3D boxes via the C code.
+    previous_spin_temp: :class:`~TsBox`
+        The spin temperature box at the previous redshift. Becomes relevant only when redshift < Z_HEAT_MAX.
+    radiation_fields: :class:`~RadiationFields`
+        An object containing the radiation fields, before they had been computed.
+    R_star: float | None, optional
+        The comoving diffusion scale in the case of Lyman alpha multiple scattering.
+        Becomes relevant only when `LYA_MULTIPLE_SCATTERING` and `need_c` are set to True.
+
+    Returns
+    -------
+    :class:`~RadiationFields` :
+        An object containing the radiation fields, after they had been computed.
+    """
+    for i in range(inputs.astro_params.N_STEP_TS):
+        R_inner = R_range[i - 1].to("Mpc").value if i > 0 else 0
+        R_outer = R_range[i].to("Mpc").value
+
+        if zpp_avg[i] >= z_max:
+            radiation_fields.filtered_sfr.value[...] = 0
+            radiation_fields.filtered_xray.value[...] = 0
+            if inputs.astro_options.USE_MINI_HALOS:
+                if not need_c:
+                    # If the shell is beyond z_max, we compute the mean log10_Mcrit_MCG
+                    # under the assumption of zero LW flux a constant v_cb, and no reionization feedback
+                    from ..wrapper import cfuncs
+
+                    mturn_MCG = cfuncs.get_molecular_cooling_threshold_with_feedbacks(
+                        inputs=inputs,
+                        redshifts=zpp_avg[i],
+                        J_LW_21=0.0,
+                        v_cb=inputs.cosmo_tables.V_CB_AVG,
+                    )
+                    radiation_fields.mean_log10_Mcrit_LW.value[i] = np.log10(
+                        np.max([mturn_MCG, inputs.astro_params.M_TURN_STELLAR_FEEDBACK])
+                    )
+                radiation_fields.filtered_sfr_mini.value[...] = 0
+                if inputs.astro_options.LYA_MULTIPLE_SCATTERING:
+                    radiation_fields.filtered_sfr_lw.value[...] = 0
+                    radiation_fields.filtered_sfr_mini_lw.value[...] = 0
+            logger.debug(f"ignoring Radius {i} which is above Z_HEAT_MAX")
+            continue
+
+        hbox_interp = interp_halo_boxes(
+            halo_boxes=hboxes[::-1],
+            interp_fields=interp_fields,
+            redshift=zpp_avg[i],
+            need_c=need_c,
+        )
+
+        if need_c:
+            radiation_fields = radiation_fields.compute(
+                redshift=redshift,
+                halobox=hbox_interp,
+                R_inner=R_inner,
+                R_outer=R_outer,
+                R_ct=i,
+                R_star=R_star.to("Mpc").value,
+                perturbed_field=perturbed_field,
+                previous_spin_temp=previous_spin_temp,
+                initial_conditions=initial_conditions,
+                mode=update_rad_fields_mode["eval"],
+                cleanup=cleanup,
+                allow_already_computed=True,
+            )
+        else:
+            radiation_fields.mean_log10_Mcrit_LW.value[i] = (
+                hbox_interp.log10_Mcrit_MCG_ave
+            )
+
+    return radiation_fields
+
+
+# NOTE: the current implementation of this box is very hacky, since I have trouble figuring out a way to _compute()
+#   over multiple redshifts in a nice way using this wrapper.
+# TODO: if we move some code to jax or similar I think this would be one of the first candidates (just filling out some filtered grids)
+# TODO: I changed the argument of the initializer below to sigma=True (instead of broadcast_inputs=True). This is because we now call
+# setup_radiation_fields() in the C code that corresponds to this function. However, sigma is required only in the old Eulerian source models.
+# This should be changed back once https://github.com/21cmfast/21cmFAST/issues/668 is fixed.
+@single_field_func
+@init_c_state(sigma=True)
+def compute_radiation_fields(
+    *,
+    hboxes: list[HaloBox],
+    redshift: float,
+    previous_ionize_box: IonizedBox | None = None,
+    perturbed_field: PerturbedField | None = None,
+    previous_spin_temp: TsBox | None = None,
+    initial_conditions: InitialConditions | None = None,
+    cleanup: bool = True,
+) -> RadiationFields:
+    r"""
+    Compute the radiation fields, given the past emissivity fields.
+
+    This will filter over the emissivity history in annuli, computing the contribution to the
+    radiation fields.
+
+    Parameters
+    ----------
     hboxes: Sequence of :class:`~HaloBox` instances
         This contains the list of Halobox instances which are used to create this source field
     previous_ionize_box: :class:`IonizedBox` or None
         An ionized box at higher redshift. This is only used if `LYA_MULTIPLE_SCATTERING` is true.
-
+    previous_spin_temp: :class:`TsBox` or None
+        The spin temperature box at the previous redshift. Becomes relevant only when redshift < Z_HEAT_MAX.
 
     Returns
     -------
-    :class:`~XraySourceBox` :
+    :class:`~RadiationFields` :
         An object containing x ray heating, ionisation, and lyman alpha rates.
 
     Other Parameters
@@ -510,7 +640,7 @@ def compute_xray_source_field(
     inputs = hboxes[0].inputs
 
     # Initialize halo list boxes.
-    box = XraySourceBox.new(redshift=redshift, inputs=inputs)
+    radiation_fields = RadiationFields.new(redshift=redshift, inputs=inputs)
 
     # set minimum R at cell size
     l_factor = (4 * np.pi / 3.0) ** (-1 / 3)
@@ -545,107 +675,145 @@ def compute_xray_source_field(
     # inner and outer redshifts (following the C code)
     zpp_avg = zpp_edges - np.diff(np.insert(zpp_edges, 0, redshift)) / 2
 
-    # Compute the comoving diffusion scale in the case of Lyman alpha multiple scattering
-    if inputs.astro_options.LYA_MULTIPLE_SCATTERING:
-        # TODO: In principle, the diffusion scale varies locally but for simplicty, we consider the global ionization value.
-        # See https://github.com/21cmfast/21cmFAST/issues/606.
-        if previous_ionize_box is None:
-            x_HI = 1.0
+    # Initialize the memory, since we may not go through the C code
+    radiation_fields._init_arrays()
+
+    # Let's figure out if we really need to go through the C code
+    sfr_allzero = np.all([np.all(hbox.get("halo_sfr") == 0) for hbox in hboxes])
+    lowest_shell_above_zmax = zpp_avg.min() >= z_max
+    need_c = not (sfr_allzero or lowest_shell_above_zmax)
+
+    if need_c:
+        # Compute the comoving diffusion scale in the case of Lyman alpha multiple scattering
+        if inputs.astro_options.LYA_MULTIPLE_SCATTERING:
+            # TODO: In principle, the diffusion scale varies locally but for simplicty, we consider the global ionization value.
+            # See https://github.com/21cmfast/21cmFAST/issues/606.
+            if previous_ionize_box is None:
+                x_HI = 1.0
+            else:
+                x_HI = previous_ionize_box.neutral_fraction.value.mean()
+            A_alpha = 6.25e8 * un.Hz
+            nu_Lya = 2.46606727e15 * un.Hz
+            n_H_z0 = (
+                (1.0 - inputs.cosmo_params.Y_He)
+                * inputs.cosmo_params.cosmo.critical_density(0)
+                * inputs.cosmo_params.OMb
+                / constants.m_p
+            )
+            # Eq. (24) in arxiv: 2601.14360
+            R_star = (
+                3.0 * constants.c**4 * A_alpha**2 * n_H_z0 * x_HI * (1.0 + redshift)
+            )
+            R_star /= (
+                32.0
+                * np.pi**3
+                * nu_Lya**4
+                * inputs.cosmo_params.cosmo.H0**2
+                * inputs.cosmo_params.OMm
+            )
         else:
-            x_HI = previous_ionize_box.neutral_fraction.value.mean()
-        A_alpha = 6.25e8 * un.Hz
-        nu_Lya = 2.46606727e15 * un.Hz
-        n_H_z0 = (
-            (1.0 - inputs.cosmo_params.Y_He)
-            * inputs.cosmo_params.cosmo.critical_density(0)
-            * inputs.cosmo_params.OMb
-            / constants.m_p
-        )
-        # Eq. (24) in arxiv: 2601.14360
-        R_star = 3.0 * constants.c**4 * A_alpha**2 * n_H_z0 * x_HI * (1.0 + redshift)
-        R_star /= (
-            32.0
-            * np.pi**3
-            * nu_Lya**4
-            * inputs.cosmo_params.cosmo.H0**2
-            * inputs.cosmo_params.OMm
-        )
-    else:
-        R_star = 0.0 * un.Mpc
+            R_star = 0.0 * un.Mpc
 
-    interp_fields = ["halo_sfr", "halo_xray"]
-    if inputs.astro_options.USE_MINI_HALOS:
-        interp_fields += ["halo_sfr_mini", "log10_Mcrit_MCG_ave"]
-
-    # call the box the initialize the memory, since I give some values before computing
-    box._init_arrays()
-    for i in range(inputs.astro_params.N_STEP_TS):
-        R_inner = R_range[i - 1].to("Mpc").value if i > 0 else 0
-        R_outer = R_range[i].to("Mpc").value
-
-        if zpp_avg[i] >= z_max:
-            box.filtered_sfr.value[i] = 0
-            box.filtered_xray.value[i] = 0
-            if inputs.astro_options.USE_MINI_HALOS:
-                # If the shell is beyond z_max, we set the SFR to zero and compute the mean log10_Mcrit_MCG
-                # under the assumption of zero LW flux a constant v_cb, and no reionization feedback
-                from ..wrapper import cfuncs
-
-                mturn_MCG = cfuncs.get_molecular_cooling_threshold_with_feedbacks(
-                    inputs=inputs,
-                    redshifts=zpp_avg[i],
-                    J_LW_21=0.0,
-                    v_cb=inputs.cosmo_tables.V_CB_AVG,
-                )
-                box.filtered_sfr_mini.value[i] = 0
-                box.mean_log10_Mcrit_LW.value[i] = np.log10(
-                    np.max([mturn_MCG, inputs.astro_params.M_TURN_STELLAR_FEEDBACK])
-                )
-                if inputs.astro_options.LYA_MULTIPLE_SCATTERING:
-                    box.filtered_sfr_lw.value[i] = 0
-                    box.filtered_sfr_mini_lw.value[i] = 0
-            logger.debug(f"ignoring Radius {i} which is above Z_HEAT_MAX")
-            continue
-
-        hbox_interp = interp_halo_boxes(
-            halo_boxes=hboxes[::-1],
-            fields=interp_fields,
-            redshift=zpp_avg[i],
-        )
-
-        # if we have no halos we ignore the whole shell
-        sfr_allzero = np.all(hbox_interp.get("halo_sfr") == 0)
+        interp_fields = ["halo_sfr", "halo_xray"]
         if inputs.astro_options.USE_MINI_HALOS:
-            sfr_allzero = sfr_allzero & np.all(hbox_interp.get("halo_sfr_mini") == 0)
-        if sfr_allzero:
-            box.filtered_sfr.value[i] = 0
-            box.filtered_xray.value[i] = 0
-            if inputs.astro_options.USE_MINI_HALOS:
-                box.filtered_sfr_mini.value[i] = 0
-                box.mean_log10_Mcrit_LW.value[i] = hbox_interp.log10_Mcrit_MCG_ave
-                if inputs.astro_options.LYA_MULTIPLE_SCATTERING:
-                    box.filtered_sfr_lw.value[i] = 0
-                    box.filtered_sfr_mini_lw.value[i] = 0
-            logger.debug(f"ignoring Radius {i} due to no stars")
-            continue
+            interp_fields += ["halo_sfr_mini"]
 
-        box = box.compute(
-            halobox=hbox_interp,
-            R_inner=R_inner,
-            R_outer=R_outer,
-            R_ct=i,
-            R_star=R_star.to("Mpc").value,
+        # Get log10_Mcrit_MCG_ave for each shell
+        # TODO: The reason why this field is evaluated separately is because it is already required in setup_radiation_fields() in the C code,
+        # as it sets rad_setup->ave_log10_MturnLW. This array is mostly used for the old Eulerian source model calculations, which will be fixed
+        # in the future (see https://github.com/21cmfast/21cmFAST/issues/668), but it is still needed for the Lagrangian source model as well
+        # (specifically, in global_reion_properties) for two purposese:
+        #   (1) For computing the global Nion, which is used for the NO_LIGHT condition. Here however, note that only the first entry of
+        #       ave_log10_MturnLW is needed, namely for that computation we care about only the CURRENT global turnover mass, not its history.
+        #       This usage therefore does not require the full global array as we compute below.
+        #   (2) For computing the lower limit of the frequency integral (it is used in nu_tau_one_MINI, which is called by fill_freqint_tables).
+        #       Here, we ought to have the full history of the global turnover mass, since that lower limit depends on the frequency in which
+        #       the X-ray optical depth is unity. In order to compute the X-ray optical depth, we need to integrate over the history of the global
+        #       neutral volume filling factor, which is currently approximated by the global Nion (the code does something like x_HI = 1 - Nion/(1-x_e)).
+        #       Hence, the full history of the global turnover mass is needed in order to detemrine the history of x_HI, which is integrated in order to
+        #       get the X-ray optical depth, which is required for setting the lower limit for the frequency integral. In that context, note that the code
+        #       actually uses the global turnover mass at zpp (the redshift that corresponds to the shell), and not at zhat (the dummy integration variable
+        #       in the X-ray optical depth integral), which I believe is a MISTAKE/undocmented approximation. Anyway, the necessity for the full history of
+        #       the global turnover mass for setting the lower limit (as well evaluating the global turnover mass at zpp) should be fixed when addressing
+        #       https://github.com/21cmfast/21cmFAST/issues/659, where the global x_HI at zpp is taken from its history, as was evaluated by the reionization
+        #       code.
+        if inputs.astro_options.USE_MINI_HALOS:
+            radiation_fields = _interpolate_and_evaluate_radiation_fields(
+                redshift=redshift,
+                inputs=inputs,
+                hboxes=hboxes,
+                interp_fields=["log10_Mcrit_MCG_ave"],
+                R_range=R_range,
+                zpp_avg=zpp_avg,
+                z_max=z_max,
+                need_c=False,  # We don't want to use the C code at this stage
+                radiation_fields=radiation_fields,
+            )
+
+        # Initialize the radiation fields in the C code (with mode="setup")
+        # TODO: this is a bit hacky. A better solution would be to have RadiationFieldsSetup that we have in the C code as an
+        #       OutputStructZ, but I suggeste to wait with this solution until https://github.com/21cmfast/21cmFAST/issues/668 is
+        #       fixed, as RadiationFieldsSetup would become much simpler
+        radiation_fields.compute(
+            redshift=redshift,
+            halobox=hboxes[0],  # dummy
+            R_inner=0.0,  # dummy
+            R_outer=0.0,  # dummy
+            R_ct=0,  # dummy
+            R_star=0.0,  # dummy
+            perturbed_field=perturbed_field,
+            previous_spin_temp=previous_spin_temp,
+            initial_conditions=initial_conditions,
+            mode=update_rad_fields_mode["setup"],
+            cleanup=cleanup,
             allow_already_computed=True,
         )
 
-    # Sometimes we don't compute at all
-    # (if the first zpp > z_max or there are no halos at max R)
-    # in which case the array is not marked as computed
-    if not box.is_computed:
-        for name, array in box.arrays.items():
-            setattr(box, name, array.computed())
+        # Interpolate the halo boxes and evaluate the radiation fields
+        radiation_fields = _interpolate_and_evaluate_radiation_fields(
+            redshift=redshift,
+            inputs=inputs,
+            hboxes=hboxes,
+            interp_fields=interp_fields,
+            R_range=R_range,
+            zpp_avg=zpp_avg,
+            z_max=z_max,
+            R_star=R_star,
+            need_c=True,  # Now we call the C function
+            perturbed_field=perturbed_field,
+            previous_spin_temp=previous_spin_temp,
+            initial_conditions=initial_conditions,
+            cleanup=cleanup,
+            radiation_fields=radiation_fields,
+        )
 
-    return box
+        # Cleanup the radiation fields in the C code (with mode="cleanup"). This also multiplies the radiation fields by appropriate
+        # constants to make them physically meaningful quantities.
+        # TODO: this is a bit hacky. A better solution would be to have RadiationFieldsSetup that we have in the C code as an
+        #       OutputStructZ, but I suggeste to wait with this solution until https://github.com/21cmfast/21cmFAST/issues/668 is
+        #       fixed, as RadiationFieldsSetup would become much simpler
+        radiation_fields.compute(
+            redshift=redshift,
+            halobox=hboxes[0],  # dummy
+            R_inner=0.0,  # dummy
+            R_outer=0.0,  # dummy
+            R_ct=0,  # dummy
+            R_star=0.0,  # dummy
+            perturbed_field=perturbed_field,
+            previous_spin_temp=previous_spin_temp,
+            initial_conditions=initial_conditions,
+            mode=update_rad_fields_mode["cleanup"],
+            cleanup=cleanup,
+            allow_already_computed=True,
+        )
+    else:
+        # Sometimes we don't compute at all
+        # (if the first zpp > z_max or there are no halos at max R)
+        # in which case the array is not marked as computed
+        for name, array in radiation_fields.arrays.items():
+            setattr(radiation_fields, name, array.computed())
+
+    return radiation_fields
 
 
 @single_field_func
@@ -655,7 +823,7 @@ def compute_spin_temperature(
     initial_conditions: InitialConditions,
     perturbed_field: PerturbedField,
     inputs: InputParameters | None = None,
-    xray_source_box: XraySourceBox | None = None,
+    radiation_fields: RadiationFields | None = None,
     previous_spin_temp: TsBox | None = None,
     cleanup: bool = False,
 ) -> TsBox:
@@ -678,9 +846,8 @@ def compute_spin_temperature(
         box. The redshift of perturb field is allowed to be different than `redshift`. If so, it
         will be interpolated to the correct redshift, which can provide a speedup compared to
         actually computing it at the desired redshift.
-    xray_source_box : :class:`XraySourceBox`, optional
-        When using a lagrangian source model, this box specifies the filtered sfr and xray emissivity at all
-        redshifts/filter radii required by the spin temperature algorithm.
+    radiation_fields : :class:`RadiationFields`, optional
+        This input specifies radiation fields, i.e. X-ray heating rate, photoionization rate, and Lyman-alpha flux.
     previous_spin_temp : :class:`TsBox` or None
         The previous spin temperature box. Needed when we are beyond the first snapshot
 
@@ -699,13 +866,33 @@ def compute_spin_temperature(
     if redshift >= inputs.simulation_options.Z_HEAT_MAX:
         previous_spin_temp = TsBox.dummy()
 
-    if xray_source_box is None:
+    if radiation_fields is None:
         if inputs.matter_options.lagrangian_source_grid:
             raise ValueError(
-                f"xray_source_box is required for SOURCE_MODEL= {inputs.matter_options.SOURCE_MODEL}"
+                f"radiation_fields is required for SOURCE_MODEL= {inputs.matter_options.SOURCE_MODEL}"
             )
         else:
-            xray_source_box = XraySourceBox.dummy()
+            # In case of the old Eulerian source model, we use the 3D arrays of RadiationFields in the C code of SpinTemperatureBox.c.
+            # TODO: this logic will have to be changed in the future once https://github.com/21cmfast/21cmFAST/issues/668 is solved
+            # (and then radiation_fields will never be None).
+            radiation_fields = RadiationFields.new(redshift=redshift, inputs=inputs)
+            shape = radiation_fields.xray_heating_rate.shape
+
+            required_arrays = TsBox.new(
+                redshift=0, inputs=inputs
+            ).get_required_input_arrays(radiation_fields)
+
+            # Set the arrays to zero
+            for array in required_arrays:
+                # TODO: the radiation arrays below are defined as np.float64, but should be np.float32 - see https://github.com/21cmfast/21cmFAST/issues/744
+                dtype = np.float32 if "filtered" in array else np.float64
+                setattr(
+                    radiation_fields,
+                    array,
+                    Array(shape=shape, dtype=dtype)
+                    .initialize()
+                    .with_value(val=np.zeros(shape)),
+                )
 
     # Set up the box without computing anything.
     box = TsBox.new(
@@ -717,7 +904,7 @@ def compute_spin_temperature(
     return box.compute(
         cleanup=cleanup,
         perturbed_field=perturbed_field,
-        xray_source_box=xray_source_box,
+        radiation_fields=radiation_fields,
         prev_spin_temp=previous_spin_temp,
         ics=initial_conditions,
     )

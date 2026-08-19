@@ -10,6 +10,14 @@ from py21cmfast.drivers._global_initialization import (
 
 N_REPEAT = 10
 
+pytestmark = [
+    pytest.mark.filterwarnings("ignore:^The maximum halo mass:UserWarning"),
+    pytest.mark.filterwarnings("ignore:^You are setting R_BUBBLE_MAX:UserWarning"),
+    pytest.mark.filterwarnings(
+        "ignore:^USE_MINI_HALOS is False but V_CB_MODEL:UserWarning"
+    ),
+]
+
 
 def test_global_initialization_is_singleton():
     """Test that the GlobalInitializationManager is a singleton."""

@@ -673,7 +673,7 @@ def generate_coeval(
         yield coeval, coeval.redshift in out_redshifts
 
         # Purge the previous coeval after we're done with it
-        # Note: we do not attempt to purge halo box from prev_coeval, since it used in compute_xray_source_field.
+        # Note: we do not attempt to purge halo box from prev_coeval, since it used in compute_radiation_fields.
         #       Halo boxes are ultimately purged in halobox.prepare_for_next_snapshot().
         #       Meanwhile, unnecessary fields from initial_conditions were removed via prepare_for_perturb and prepare_for_spin_temp
         if prev_coeval is not None and prev_coeval.redshift not in out_redshifts:
@@ -772,7 +772,7 @@ def _redshift_loop_generator(
     this_halobox = None
     this_spin_temp = None
     this_halofield = None
-    this_xraysource = None
+    this_radiation_fields = None
 
     kw = {
         **iokw,
@@ -811,26 +811,34 @@ def _redshift_loop_generator(
             if inputs.astro_options.USE_TS_FLUCT:
                 if inputs.matter_options.lagrangian_source_grid:
                     # append the halo redshift array so we have all halo boxes [z,zmax]
-                    this_xraysource = sf.compute_xray_source_field(
+                    this_radiation_fields = sf.compute_radiation_fields(
                         redshift=z,
                         hboxes=[*hbox_arr, this_halobox],
                         previous_ionize_box=getattr(prev_coeval, "ionized_box", None),
-                        write=write.xray_source_box,
-                        **kw,
+                        previous_spin_temp=getattr(prev_coeval, "ts_box", None),
+                        perturbed_field=this_perturbed_field,
+                        initial_conditions=initial_conditions,
+                        cleanup=(cleanup and z == all_redshifts[-1]),
+                        write=write.radiation_fields,
+                        **iokw,
                     )
 
                 this_spin_temp = sf.compute_spin_temperature(
                     inputs=inputs,
                     previous_spin_temp=getattr(prev_coeval, "ts_box", None),
                     perturbed_field=this_perturbed_field,
-                    xray_source_box=this_xraysource,
+                    radiation_fields=this_radiation_fields,
                     write=write.spin_temp,
                     **kw,
                     cleanup=(cleanup and z == all_redshifts[-1]),
                 )
-                # Purge XraySourceBox because it's enormous
+                # Purge RadiationFields because it's enormous
+                # TODO: now that RadiationFields (formerly known as XraySourceBox) does not contain 4D arrays anymore,
+                #       it is not as huge as it was before, but it does contain some extra boxes that are no longer required
+                #       once the spin temperature is computed. These boxes however contain some interesting quantities (radiation fields!),
+                #       we should consider keeping them, but probably as part of working on https://github.com/21cmfast/21cmFAST/issues/642
                 if inputs.matter_options.lagrangian_source_grid:
-                    this_xraysource.purge(force=True)
+                    this_radiation_fields.purge(force=True)
 
             this_ionized_box = sf.compute_ionization_field(
                 inputs=inputs,
