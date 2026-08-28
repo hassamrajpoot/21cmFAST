@@ -89,13 +89,12 @@ class LightCone:
         """Get a list of the names of the available fields in the simulation."""
         possible_outputs = [
             PerturbedField.new(inputs, redshift=0),
+            HaloBox.new(inputs, redshift=0),
             IonizedBox.new(inputs, redshift=0),
             BrightnessTemp.new(inputs, redshift=0),
         ]
         if inputs.astro_options.USE_TS_FLUCT:
             possible_outputs.append(TsBox.new(inputs, redshift=0))
-        if inputs.matter_options.lagrangian_source_grid:
-            possible_outputs.append(HaloBox.new(inputs, redshift=0))
         field_names = ("log10_mturn_acg", "log10_mturn_mcg")
         for output in possible_outputs:
             field_names += tuple(output.arrays.keys())

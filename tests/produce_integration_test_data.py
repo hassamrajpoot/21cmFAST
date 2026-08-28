@@ -85,9 +85,7 @@ OPTIONS_TESTRUNS = {
     "simple": [18, {}],
     "no-mdz": [
         18,
-        {
-            "SOURCE_MODEL": "CONST-ION-EFF",
-        },
+        {"SOURCE_MODEL": "CONST-ION-EFF"},
     ],
     "mini": [
         18,
@@ -245,7 +243,6 @@ OPTIONS_TESTRUNS = {
     "minimize_mem": [
         18,
         {
-            "USE_TS_FLUCT": True,
             "RECOMB_MODEL": "inhomogeneous",
             "R_BUBBLE_MAX": 50.0,
             "MINIMIZE_MEMORY": True,

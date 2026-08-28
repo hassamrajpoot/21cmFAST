@@ -1082,7 +1082,7 @@ class HaloBox(OutputStructZ):
     halo_mass = _arrayfield(optional=True)
     halo_stars = _arrayfield(optional=True)
     halo_stars_mini = _arrayfield(optional=True)
-    halo_sfr = _arrayfield()
+    halo_sfr = _arrayfield(optional=True)
     halo_sfr_mini = _arrayfield(optional=True)
     halo_xray = _arrayfield(optional=True)
     n_ion = _arrayfield()
@@ -1110,19 +1110,22 @@ class HaloBox(OutputStructZ):
         dim = inputs.simulation_options.HII_DIM
         shape = (dim, dim, int(inputs.simulation_options.NON_CUBIC_FACTOR * dim))
 
-        out = {
-            "halo_sfr": Array(shape, dtype=np.float32),
-            "n_ion": Array(shape, dtype=np.float32),
-        }
+        # TODO: right now it's a waste of memory and time to compute n_ion for Eulerian source models,
+        # this might change in the future
+        out = {"n_ion": Array(shape, dtype=np.float32)}
 
-        if inputs.astro_options.USE_MINI_HALOS:
-            out["halo_sfr_mini"] = Array(shape, dtype=np.float32)
-
-        if inputs.astro_options.RECOMB_MODEL != "none":
+        # TODO: similarly, as above, whalo_sfr is only needed for Lagrangian source models at the moment, but this might change
+        if (
+            inputs.astro_options.RECOMB_MODEL != "none"
+            and inputs.matter_options.lagrangian_source_grid
+        ):
             out["whalo_sfr"] = Array(shape, dtype=np.float32)
 
         if inputs.astro_options.USE_TS_FLUCT:
             out["halo_xray"] = Array(shape, dtype=np.float32)
+            out["halo_sfr"] = Array(shape, dtype=np.float32)
+            if inputs.astro_options.USE_MINI_HALOS:
+                out["halo_sfr_mini"] = Array(shape, dtype=np.float32)
 
         if config["EXTRA_HALOBOX_FIELDS"]:
             out["count"] = Array(shape, dtype=np.float32)
@@ -1155,14 +1158,23 @@ class HaloBox(OutputStructZ):
                 required += ["J_21_LW"]
         elif isinstance(input_box, IonizedBox):
             required += ["ionisation_rate_G12", "z_reion"]
+        elif isinstance(input_box, PerturbedField):
+            if not self.matter_options.lagrangian_source_grid:
+                required += ["density"]
         elif isinstance(input_box, InitialConditions):
-            if self.matter_options.PERTURB_ON_HIGH_RES:
-                required += ["hires_density", "hires_vx", "hires_vy", "hires_vz"]
-            else:
-                required += ["lowres_density", "lowres_vx", "lowres_vy", "lowres_vz"]
+            if self.matter_options.lagrangian_source_grid:
+                if self.matter_options.PERTURB_ON_HIGH_RES:
+                    required += ["hires_density", "hires_vx", "hires_vy", "hires_vz"]
+                else:
+                    required += [
+                        "lowres_density",
+                        "lowres_vx",
+                        "lowres_vy",
+                        "lowres_vz",
+                    ]
 
-            if self.matter_options.PERTURB_ALGORITHM == "2LPT":
-                required += [f"{k}_2LPT" for k in required if "_v" in k]
+                if self.matter_options.PERTURB_ALGORITHM == "2LPT":
+                    required += [f"{k}_2LPT" for k in required if "_v" in k]
 
             if (
                 self.matter_options.V_CB_MODEL == "FLUCTS"
@@ -1178,6 +1190,7 @@ class HaloBox(OutputStructZ):
         self,
         *,
         initial_conditions: InitialConditions,
+        perturbed_field: PerturbedField,
         halo_catalog: HaloCatalog,
         previous_spin_temp: TsBox,
         previous_ionize_box: IonizedBox,
@@ -1188,6 +1201,7 @@ class HaloBox(OutputStructZ):
             allow_already_computed,
             self.redshift,
             initial_conditions,
+            perturbed_field,
             halo_catalog,
             previous_spin_temp,
             previous_ionize_box,
@@ -1195,30 +1209,31 @@ class HaloBox(OutputStructZ):
 
     def prepare_for_next_snapshot(self, next_z, force: bool = False):
         """Prepare the HaloBox for the next snapshot."""
-        # find maximum z
-        d_max_needed = (
-            self.cosmo_params.cosmo.comoving_distance(next_z)
-            + self.astro_params.R_MAX_TS * u.Mpc
-        )
-        max_z_needed = z_at_value(
-            self.cosmo_params.cosmo.comoving_distance, d_max_needed
-        )
-
-        z_arr = np.array(self.inputs.node_redshifts)
-        # we need one redshift above the max z for interpolation, so find that value
-        last_z_above = (
-            z_arr[z_arr > max_z_needed].min()
-            if z_arr.max() > max_z_needed
-            else z_arr.max() + 1
-        )
-
-        # If we need the box, only keep the interpolated fields
         keep = []
-        if self.redshift <= last_z_above:
-            if self.astro_options.USE_TS_FLUCT:
+        # We need to keep fields for interpolation only if we calculate the spin temperature
+        if self.astro_options.USE_TS_FLUCT:
+            # find maximum z
+            d_max_needed = (
+                self.cosmo_params.cosmo.comoving_distance(next_z)
+                + self.astro_params.R_MAX_TS * u.Mpc
+            )
+            max_z_needed = z_at_value(
+                self.cosmo_params.cosmo.comoving_distance, d_max_needed
+            )
+
+            z_arr = np.array(self.inputs.node_redshifts)
+            # we need one redshift above the max z for interpolation, so find that value
+            last_z_above = (
+                z_arr[z_arr > max_z_needed].min()
+                if z_arr.max() > max_z_needed
+                else z_arr.max() + 1
+            )
+
+            # If we need the box, only keep the interpolated fields
+            if self.redshift <= last_z_above:
                 keep += ["halo_sfr", "halo_xray"]
-            if self.astro_options.USE_MINI_HALOS and self.astro_options.USE_TS_FLUCT:
-                keep += ["halo_sfr_mini"]
+                if self.astro_options.USE_MINI_HALOS:
+                    keep += ["halo_sfr_mini"]
         self.prepare(keep=keep, force=force)
 
 
@@ -1455,23 +1470,18 @@ class TsBox(OutputStructZ):
             if self.astro_options.USE_MINI_HALOS:
                 required += ["J_21_LW"]
         elif isinstance(input_box, RadiationFields):
-            if self.matter_options.lagrangian_source_grid:
-                required += ["filtered_sfr", "filtered_xray"]
-                if self.astro_options.USE_MINI_HALOS:
-                    required += ["filtered_sfr_mini"]
+            required += [
+                "xray_ionization_rate",
+                "xray_lya_flux",
+            ]
+            if self.astro_options.USE_X_RAY_HEATING:
+                required += ["xray_heating_rate"]
+            if self.astro_options.USE_MINI_HALOS:
+                required += ["lyw_flux"]
+            if self.astro_options.USE_LYA_HEATING:
+                required += ["lya_flux_continuum", "lya_flux_injected"]
             else:
-                required += [
-                    "xray_ionization_rate",
-                    "xray_lya_flux",
-                ]
-                if self.astro_options.USE_X_RAY_HEATING:
-                    required += ["xray_heating_rate"]
-                if self.astro_options.USE_MINI_HALOS:
-                    required += ["lyw_flux"]
-                if self.astro_options.USE_LYA_HEATING:
-                    required += ["lya_flux_continuum", "lya_flux_injected"]
-                else:
-                    required += ["lya_flux_continuum_injected"]
+                required += ["lya_flux_continuum_injected"]
         else:
             raise ValueError(f"{type(input_box)} is not an input required for TsBox!")
 
@@ -1578,8 +1588,9 @@ class IonizedBox(OutputStructZ):
         }
 
         if not inputs.matter_options.MINIMIZE_MEMORY:
-            out["mean_free_path"] = Array(shape, dtype=np.float32)
             out["kinetic_temperature"] = Array(shape, dtype=np.float32)
+            if inputs.astro_options.RECOMB_MODEL != "none":
+                out["mean_free_path"] = Array(shape, dtype=np.float32)
 
         if inputs.astro_options.RECOMB_MODEL == "inhomogeneous":
             out["cumulative_recombinations"] = Array(shape, dtype=np.float32)
@@ -1634,9 +1645,10 @@ class IonizedBox(OutputStructZ):
                     "unnormalised_nion_mini",
                 ]
         elif isinstance(input_box, HaloBox):
-            required += ["n_ion"]
-            if self.astro_options.RECOMB_MODEL != "none":
-                required += ["whalo_sfr"]
+            if self.matter_options.lagrangian_source_grid:
+                required += ["n_ion"]
+                if self.astro_options.RECOMB_MODEL != "none":
+                    required += ["whalo_sfr"]
         else:
             raise ValueError(
                 f"{type(input_box)} is not an input required for IonizedBox!"

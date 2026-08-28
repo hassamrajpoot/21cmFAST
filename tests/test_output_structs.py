@@ -241,31 +241,45 @@ def test_optional_field_perturbed_halocat(default_input_struct_lc: InputParamete
 def test_optional_field_halobox(default_input_struct_lc: InputParameters):
     """Ensure that the correct HaloBox fields are set based on the parameters."""
     hb = ox.HaloBox.new(redshift=0.0, inputs=default_input_struct_lc)
+    assert hb.count is None
     assert hb.halo_mass is None
-    assert isinstance(hb.halo_sfr, Array)
-    assert isinstance(hb.n_ion, Array)
+    assert hb.halo_stars is None
+    assert hb.halo_stars_mini is None
+    assert hb.halo_sfr is None
     assert hb.halo_sfr_mini is None
     assert hb.halo_xray is None
     assert hb.whalo_sfr is None
+    assert isinstance(hb.n_ion, Array)
 
     with config.use(EXTRA_HALOBOX_FIELDS=True):
         hb = ox.HaloBox.new(redshift=0.0, inputs=default_input_struct_lc)
         assert isinstance(hb.halo_mass, Array)
         assert isinstance(hb.count, Array)
+        assert isinstance(hb.halo_stars, Array)
+        assert hb.halo_stars_mini is None
 
-        inputs = default_input_struct_lc.evolve_input_structs(
-            RECOMB_MODEL="inhomogeneous"
+        hb = ox.HaloBox.new(
+            redshift=0.0,
+            inputs=default_input_struct_lc.evolve_input_structs(
+                USE_TS_FLUCT=True, RECOMB_MODEL="inhomogeneous", USE_MINI_HALOS=True
+            ),
         )
-        hb = ox.HaloBox.new(redshift=0.0, inputs=inputs)
-        assert isinstance(hb.whalo_sfr, Array)
+        assert isinstance(hb.halo_stars_mini, Array)
 
-        inputs = inputs.evolve_input_structs(USE_TS_FLUCT=True)
-        hb = ox.HaloBox.new(redshift=0.0, inputs=inputs)
-        assert isinstance(hb.halo_xray, Array)
+    inputs = default_input_struct_lc.evolve_input_structs(
+        RECOMB_MODEL="inhomogeneous", SOURCE_MODEL="L-INTEGRAL"
+    )
+    hb = ox.HaloBox.new(redshift=0.0, inputs=inputs)
+    assert isinstance(hb.whalo_sfr, Array)
 
-        inputs = inputs.evolve_input_structs(USE_MINI_HALOS=True)
-        hb = ox.HaloBox.new(redshift=0.0, inputs=inputs)
-        assert isinstance(hb.halo_sfr_mini, Array)
+    inputs = inputs.evolve_input_structs(USE_TS_FLUCT=True)
+    hb = ox.HaloBox.new(redshift=0.0, inputs=inputs)
+    assert isinstance(hb.halo_sfr, Array)
+    assert isinstance(hb.halo_xray, Array)
+
+    inputs = inputs.evolve_input_structs(USE_MINI_HALOS=True)
+    hb = ox.HaloBox.new(redshift=0.0, inputs=inputs)
+    assert isinstance(hb.halo_sfr_mini, Array)
 
 
 def test_optional_field_xrs(default_input_struct_lc: InputParameters):

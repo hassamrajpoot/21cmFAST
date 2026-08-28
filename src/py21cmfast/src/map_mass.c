@@ -13,6 +13,7 @@
 #include "HaloBox.h"
 #include "InputParameters.h"
 #include "cosmology.h"
+#include "exceptions.h"
 #include "indexing.h"
 #include "logger.h"
 
@@ -207,7 +208,8 @@ void move_grid_masses(double redshift, float *dens_pointer, int dens_dim[3], flo
     }
 }
 
-// Function that maps a IC density grid to the perturbed density grid
+// Function that maps a IC density grid to the perturbed density grid, for the lagrangian source
+// models. For the Eulerian source models, no advection is applied.
 // TODO: This shares a lot of code with move_grid_masses and (future) move_cat_galprops.
 //  I should look into combining elements, however since the differences
 //  are on the innermost loops, any generalisation is likely to slow things down.
@@ -216,48 +218,131 @@ void move_grid_galprops(double redshift, float *dens_pointer, int dens_dim[3],
                         HaloBox *boxes, int out_dim[3], float *log10_mturn_acg_grid,
                         float *log10_mturn_mcg_grid, ScalingConstants *consts,
                         IntegralCondition *integral_cond) {
-    // grid dimension constants
-    double boxlen = simulation_options_global->BOX_LEN;
-    double boxlen_z = boxlen * simulation_options_global->NON_CUBIC_FACTOR;
-    double box_size[3] = {boxlen, boxlen, boxlen_z};
-    double dim_ratio_vel = (double)vel_dim[0] / (double)dens_dim[0];
-    double dim_ratio_out = (double)out_dim[0] / (double)dens_dim[0];
+    double growth_factor, init_growth_factor, displacement_factor_2LPT,
+        init_displacement_factor_2LPT;
+    double dim_ratio_vel, dim_ratio_out;
+    double dt_dz;
+    double prefactor_mass, prefactor_stars, prefactor_stars_mini;
+    double prefactor_xray, prefactor_xray_mini;
+    double prefactor_sfr, prefactor_sfr_mini, prefactor_nion, prefactor_nion_mini;
+    double velocity_displacement_factor[3], velocity_displacement_factor_2LPT[3];
+
+    // The following factor must be unity for Eulerian source models
     double vol_ratio_out = ((double)out_dim[0] * (double)out_dim[1] * (double)out_dim[2]) /
                            ((double)dens_dim[0] * (double)dens_dim[1] * (double)dens_dim[2]);
+    if (source_model_uses_eulerian_grids(matter_options_global->SOURCE_MODEL) &&
+        vol_ratio_out != 1.0) {
+        LOG_ERROR(
+            "Volume ratio between output emissivity grid and input density grids is not unity for "
+            "Eulerian source models.");
+        Throw(ValueError);
+    }
 
-    double prefactor_mass = RHOcrit * cosmo_params_global->OMm * vol_ratio_out;
-    double prefactor_stars = RHOcrit * cosmo_params_global->OMb * consts->fstar_10 * vol_ratio_out;
-    double prefactor_stars_mini =
-        RHOcrit * cosmo_params_global->OMb * consts->fstar_7 * vol_ratio_out;
-    double prefactor_xray = RHOcrit * cosmo_params_global->OMm * vol_ratio_out;
+    if (!source_model_is_mass_dependent(matter_options_global->SOURCE_MODEL)) {
+        dt_dz = dtdz(redshift);
+    }
 
-    double prefactor_sfr = prefactor_stars / consts->t_star / consts->t_h;
-    double prefactor_sfr_mini = prefactor_stars_mini / consts->t_star / consts->t_h;
-    double prefactor_nion = prefactor_stars * consts->fesc_10 * consts->pop2_ion;
-    double prefactor_nion_mini = prefactor_stars_mini * consts->fesc_7 * consts->pop3_ion;
+    // The following factor is needed only if the user is interested in extra fields
+    if (config_settings.EXTRA_HALOBOX_FIELDS) {
+        prefactor_mass = RHOcrit * cosmo_params_global->OMm * vol_ratio_out;
+    }
 
-    // Setup IC velocity factors
-    double growth_factor = dicke(redshift);
-    double displacement_factor_2LPT = -(3.0 / 7.0) * growth_factor * growth_factor;  // 2LPT eq. D8
+    // Set the prefactors for the stellar mass
+    prefactor_stars = RHOcrit * cosmo_params_global->OMb * consts->fstar_10 * vol_ratio_out;
+    if (astro_options_global->USE_MINI_HALOS) {
+        prefactor_stars_mini = RHOcrit * cosmo_params_global->OMb * consts->fstar_7 * vol_ratio_out;
+    } else {
+        prefactor_stars_mini = 0.;
+    }
 
-    double init_growth_factor = dicke(simulation_options_global->INITIAL_REDSHIFT);
-    double init_displacement_factor_2LPT =
-        -(3.0 / 7.0) * init_growth_factor * init_growth_factor;  // 2LPT eq. D8
+    // X-ray emissivity is only needed if we compute the spin temperature
+    if (astro_options_global->USE_TS_FLUCT) {
+        prefactor_xray = RHOcrit * cosmo_params_global->OMm * vol_ratio_out;
+        // The following constant factors are missing for the Eulerian source models
+        if (source_model_uses_eulerian_grids(matter_options_global->SOURCE_MODEL)) {
+            prefactor_xray *=
+                (astro_params_global->L_X * 1e-38 * physconst.s_per_yr * cosmo_params_global->OMb *
+                 consts->fstar_10 / cosmo_params_global->OMm);
+            if (source_model_is_mass_dependent(matter_options_global->SOURCE_MODEL)) {
+                prefactor_xray *= 1. / consts->t_star / consts->t_h;
+            } else {
+                prefactor_xray *= 1. / dt_dz;
+            }
+        }
+        // For the Lagrangian source models, the mini-halos contribution is already included in the
+        // integral over the hmf, but for the Euelerian source models it is not already included and
+        // we set the prefactor below
+        if (source_model_uses_eulerian_grids(matter_options_global->SOURCE_MODEL) &&
+            astro_options_global->USE_MINI_HALOS) {
+            prefactor_xray_mini = RHOcrit * cosmo_params_global->OMm * vol_ratio_out;
+            prefactor_xray_mini *= (astro_params_global->L_X_MINI * 1e-38 * physconst.s_per_yr *
+                                    cosmo_params_global->OMb * consts->fstar_7 /
+                                    cosmo_params_global->OMm / consts->t_star / consts->t_h);
+        } else {
+            prefactor_xray_mini = 0.;
+        }
+    }
 
-    double velocity_displacement_factor[3] = {
-        (growth_factor - init_growth_factor) / box_size[0] * dens_dim[0],
-        (growth_factor - init_growth_factor) / box_size[1] * dens_dim[1],
-        (growth_factor - init_growth_factor) / box_size[2] * dens_dim[2]};
-    double velocity_displacement_factor_2LPT[3] = {
-        (displacement_factor_2LPT - init_displacement_factor_2LPT) / box_size[0] * dens_dim[0],
-        (displacement_factor_2LPT - init_displacement_factor_2LPT) / box_size[1] * dens_dim[1],
-        (displacement_factor_2LPT - init_displacement_factor_2LPT) / box_size[2] * dens_dim[2]};
+    // Set the prefactors for the SFRD and Nion
+    if (source_model_is_mass_dependent(matter_options_global->SOURCE_MODEL)) {
+        prefactor_nion = prefactor_stars * consts->fesc_10 * consts->pop2_ion;
+        if (astro_options_global->USE_MINI_HALOS) {
+            prefactor_nion_mini = prefactor_stars_mini * consts->fesc_7 * consts->pop3_ion;
+        }
+        if (astro_options_global->USE_TS_FLUCT) {
+            prefactor_sfr = prefactor_stars / consts->t_star / consts->t_h;
+            if (astro_options_global->USE_MINI_HALOS) {
+                prefactor_sfr_mini = prefactor_stars_mini / consts->t_star / consts->t_h;
+            }
+        }
+    } else {
+        prefactor_nion = RHOcrit * cosmo_params_global->OMb * astro_params_global->HII_EFF_FACTOR *
+                         vol_ratio_out;
+        if (astro_options_global->USE_TS_FLUCT) {
+            prefactor_sfr = prefactor_stars / dt_dz;
+        }
+        // No mini-halos contribution for the mass-independent source models
+        prefactor_sfr_mini = 0.;
+        prefactor_nion_mini = 0.;
+    }
+
+    // We need the following only for the Lagrangian source models
+    if (source_model_uses_lagrangian_grids(matter_options_global->SOURCE_MODEL)) {
+        // grid dimension constants
+        double boxlen = simulation_options_global->BOX_LEN;
+        double boxlen_z = boxlen * simulation_options_global->NON_CUBIC_FACTOR;
+        double box_size[3] = {boxlen, boxlen, boxlen_z};
+
+        dim_ratio_vel = (double)vel_dim[0] / (double)dens_dim[0];
+        dim_ratio_out = (double)out_dim[0] / (double)dens_dim[0];
+
+        // Setup IC velocity factors
+        growth_factor = dicke(redshift);
+        displacement_factor_2LPT = -(3.0 / 7.0) * growth_factor * growth_factor;  // 2LPT eq. D8
+
+        init_growth_factor = dicke(simulation_options_global->INITIAL_REDSHIFT);
+        init_displacement_factor_2LPT =
+            -(3.0 / 7.0) * init_growth_factor * init_growth_factor;  // 2LPT eq. D8
+
+        velocity_displacement_factor[0] =
+            (growth_factor - init_growth_factor) / box_size[0] * dens_dim[0];
+        velocity_displacement_factor[1] =
+            (growth_factor - init_growth_factor) / box_size[1] * dens_dim[1];
+        velocity_displacement_factor[2] =
+            (growth_factor - init_growth_factor) / box_size[2] * dens_dim[2];
+        velocity_displacement_factor_2LPT[0] =
+            (displacement_factor_2LPT - init_displacement_factor_2LPT) / box_size[0] * dens_dim[0];
+        velocity_displacement_factor_2LPT[1] =
+            (displacement_factor_2LPT - init_displacement_factor_2LPT) / box_size[1] * dens_dim[1];
+        velocity_displacement_factor_2LPT[2] =
+            (displacement_factor_2LPT - init_displacement_factor_2LPT) / box_size[2] * dens_dim[2];
+    }
 #pragma omp parallel num_threads(simulation_options_global->N_THREADS)
     {
         int i, j, k, axis;
         double pos[3], curr_dens;
         int ipos[3];
-        index_huge vel_index, dens_index, mturn_index;
+        index_huge vel_index, dens_index;
         double l10_mturn_acg =
             log10(consts->mturn_acg_homogeneous);  // used if we don't apply inhomogeneous
                                                    // reionization feedback on ACGS
@@ -267,30 +352,30 @@ void move_grid_galprops(double redshift, float *dens_pointer, int dens_dim[3],
         for (i = 0; i < dens_dim[0]; i++) {
             for (j = 0; j < dens_dim[1]; j++) {
                 for (k = 0; k < dens_dim[2]; k++) {
-                    // Transform position to units of box size
                     pos[0] = i;
                     pos[1] = j;
                     pos[2] = k;
-                    resample_index((int[3]){i, j, k}, dim_ratio_vel, ipos);
-                    wrap_coord(ipos, vel_dim);
-                    vel_index = grid_index_general(ipos[0], ipos[1], ipos[2], vel_dim);
-                    for (axis = 0; axis < 3; axis++) {
-                        pos[axis] +=
-                            vel_pointers[axis][vel_index] * velocity_displacement_factor[axis];
-                        // add 2LPT second order corrections
-                        if (matter_options_global->PERTURB_ALGORITHM == PERTURB_ALGORITHM_2LPT) {
-                            pos[axis] -= vel_pointers_2LPT[axis][vel_index] *
-                                         velocity_displacement_factor_2LPT[axis];
+                    dens_index = grid_index_general(i, j, k, dens_dim);
+                    curr_dens = dens_pointer[dens_index];
+                    if (source_model_uses_lagrangian_grids(matter_options_global->SOURCE_MODEL)) {
+                        curr_dens *= growth_factor;
+                        // Transform position to units of box size
+                        resample_index((int[3]){i, j, k}, dim_ratio_vel, ipos);
+                        wrap_coord(ipos, vel_dim);
+                        vel_index = grid_index_general(ipos[0], ipos[1], ipos[2], vel_dim);
+                        for (axis = 0; axis < 3; axis++) {
+                            pos[axis] +=
+                                vel_pointers[axis][vel_index] * velocity_displacement_factor[axis];
+                            // add 2LPT second order corrections
+                            if (matter_options_global->PERTURB_ALGORITHM ==
+                                PERTURB_ALGORITHM_2LPT) {
+                                pos[axis] -= vel_pointers_2LPT[axis][vel_index] *
+                                             velocity_displacement_factor_2LPT[axis];
+                            }
+                            pos[axis] *= dim_ratio_out;
                         }
-                        pos[axis] *= dim_ratio_out;
                     }
 
-                    // CIC interpolation
-                    dens_index = grid_index_general(i, j, k, dens_dim);
-                    curr_dens = dens_pointer[dens_index] * growth_factor;
-
-                    resample_index((int[3]){i, j, k}, dim_ratio_out, ipos);
-                    mturn_index = grid_index_general(ipos[0], ipos[1], ipos[2], out_dim);
                     if (astro_options_global->USE_REIONIZATION_PHOTOHEATING_FEEDBACK) {
                         l10_mturn_acg = log10_mturn_acg_grid[dens_index];
                     }
@@ -307,19 +392,28 @@ void move_grid_galprops(double redshift, float *dens_pointer, int dens_dim[3],
                     // n_ion --> F_esc integral ACG
                     // fescweighted_sfr --> F_esc integral MCG
                     // halo_xray --> Xray integral
-                    do_cic_interpolation(boxes->halo_sfr, pos, out_dim,
-                                         properties.stellar_mass * prefactor_sfr);
+
+                    // Note that properties.fescweighted_sfr can be viewed as properties.n_ion_mini
+                    // (we just don't have that field)
                     do_cic_interpolation(boxes->n_ion, pos, out_dim,
                                          properties.n_ion * prefactor_nion +
                                              properties.fescweighted_sfr * prefactor_nion_mini);
-
-                    if (astro_options_global->USE_MINI_HALOS) {
-                        do_cic_interpolation(boxes->halo_sfr_mini, pos, out_dim,
-                                             properties.stellar_mass_mini * prefactor_sfr_mini);
-                    }
                     if (astro_options_global->USE_TS_FLUCT) {
-                        do_cic_interpolation(boxes->halo_xray, pos, out_dim,
-                                             properties.halo_xray * prefactor_xray);
+                        do_cic_interpolation(boxes->halo_sfr, pos, out_dim,
+                                             properties.stellar_mass * prefactor_sfr);
+                        // Note that prefactor_xray_mini is zero for the Lagrangian source models,
+                        // or if there are no mini-halos. For the Eulerian source models,
+                        // properties.halo_xray = properties.stellar_mass, so
+                        // properties.stellar_mass_mini below can be viewed as
+                        // properties.halo_xray_mini (we just don't have that field)
+                        do_cic_interpolation(
+                            boxes->halo_xray, pos, out_dim,
+                            properties.halo_xray * prefactor_xray +
+                                properties.stellar_mass_mini * prefactor_xray_mini);
+                        if (astro_options_global->USE_MINI_HALOS) {
+                            do_cic_interpolation(boxes->halo_sfr_mini, pos, out_dim,
+                                                 properties.stellar_mass_mini * prefactor_sfr_mini);
+                        }
                     }
 
                     if (config_settings.EXTRA_HALOBOX_FIELDS) {
@@ -338,11 +432,17 @@ void move_grid_galprops(double redshift, float *dens_pointer, int dens_dim[3],
             }
         }
     }
-    // Without stochasticity, these grids are the same to a constant
-    double prefactor_wsfr = 1 / consts->t_h / consts->t_star;
-    if (uses_recombination(astro_options_global->RECOMB_MODEL)) {
-        for (index_huge i = 0; i < HII_TOT_NUM_PIXELS; i++) {
-            boxes->whalo_sfr[i] = boxes->n_ion[i] * prefactor_wsfr;
+    // Only Lagrangian source models require having whalo_sfr in IonisationBox.c
+    // TODO: I think this should be changed in the future
+    if (source_model_uses_lagrangian_grids(matter_options_global->SOURCE_MODEL) &&
+        uses_recombination(astro_options_global->RECOMB_MODEL)) {
+        // Without stochasticity, these grids are the same to a constant
+        double prefactor_wsfr = 1 / consts->t_h / consts->t_star;
+        if (uses_recombination(astro_options_global->RECOMB_MODEL)) {
+#pragma omp parallel for num_threads(simulation_options_global->N_THREADS)
+            for (index_huge i = 0; i < HII_TOT_NUM_PIXELS; i++) {
+                boxes->whalo_sfr[i] = boxes->n_ion[i] * prefactor_wsfr;
+            }
         }
     }
 }
@@ -423,15 +523,16 @@ void move_halo_galprops(double redshift, HaloCatalog *halos, float *vel_pointers
 
             // CIC interpolation
             set_halo_properties(hmass, M_turn_acg, M_turn_mcg, consts, halo_rng, &properties);
-            do_cic_interpolation(boxes->halo_sfr, pos, out_dim, properties.halo_sfr);
             do_cic_interpolation(boxes->n_ion, pos, out_dim, properties.n_ion);
-            if (astro_options_global->USE_MINI_HALOS) {
-                do_cic_interpolation(boxes->halo_sfr_mini, pos, out_dim, properties.sfr_mini);
-            }
             if (astro_options_global->USE_TS_FLUCT) {
+                do_cic_interpolation(boxes->halo_sfr, pos, out_dim, properties.halo_sfr);
                 do_cic_interpolation(boxes->halo_xray, pos, out_dim, properties.halo_xray);
+                if (astro_options_global->USE_MINI_HALOS) {
+                    do_cic_interpolation(boxes->halo_sfr_mini, pos, out_dim, properties.sfr_mini);
+                }
             }
-            if (uses_recombination(astro_options_global->RECOMB_MODEL)) {
+            if (source_model_uses_lagrangian_grids(matter_options_global->SOURCE_MODEL) &&
+                uses_recombination(astro_options_global->RECOMB_MODEL)) {
                 do_cic_interpolation(boxes->whalo_sfr, pos, out_dim, properties.fescweighted_sfr);
             }
             if (config_settings.EXTRA_HALOBOX_FIELDS) {
@@ -460,15 +561,16 @@ void move_halo_galprops(double redshift, HaloCatalog *halos, float *vel_pointers
 #pragma omp for
         for (index_huge i_cell = 0; i_cell < HII_TOT_NUM_PIXELS; i_cell++) {
             boxes->n_ion[i_cell] *= cell_vol_inv;
-            boxes->halo_sfr[i_cell] *= cell_vol_inv;
             if (astro_options_global->USE_TS_FLUCT) {
+                boxes->halo_sfr[i_cell] *= cell_vol_inv;
                 boxes->halo_xray[i_cell] *= cell_vol_inv;
+                if (astro_options_global->USE_MINI_HALOS) {
+                    boxes->halo_sfr_mini[i_cell] *= cell_vol_inv;
+                }
             }
-            if (uses_recombination(astro_options_global->RECOMB_MODEL)) {
+            if (source_model_uses_lagrangian_grids(matter_options_global->SOURCE_MODEL) &&
+                uses_recombination(astro_options_global->RECOMB_MODEL)) {
                 boxes->whalo_sfr[i_cell] *= cell_vol_inv;
-            }
-            if (astro_options_global->USE_MINI_HALOS) {
-                boxes->halo_sfr_mini[i_cell] *= cell_vol_inv;
             }
             if (config_settings.EXTRA_HALOBOX_FIELDS) {
                 boxes->halo_mass[i_cell] *= cell_vol_inv;

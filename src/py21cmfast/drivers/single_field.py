@@ -303,9 +303,10 @@ def perturb_halo_catalog(
 def compute_halo_grid(
     *,
     redshift: float,
-    initial_conditions: InitialConditions,
+    initial_conditions: InitialConditions | None = None,
     inputs: InputParameters | None = None,
     halo_catalog: HaloCatalog | None = None,
+    perturbed_field: PerturbedField | None = None,
     previous_spin_temp: TsBox | None = None,
     previous_ionize_box: IonizedBox | None = None,
 ) -> HaloBox:
@@ -318,13 +319,17 @@ def compute_halo_grid(
 
     Parameters
     ----------
-    initial_conditions : :class:`~InitialConditions`
-        The initial conditions of the run.
+    initial_conditions : :class:`~InitialConditions`, optional
+        The initial conditions of the run. Becomes relevant only for Lagrangian source models,
+        or alternatively, if the user uses a Eulerian source model with USE_MINI_HALOS==True
+        and V_CB_MODEL = "FLUCTS".
     inputs : :class:`~InputParameters`, optional
         The input parameters specifying the run.
     halo_catalog: :class:`~HaloCatalog`, optional
         This contains all the dark matter haloes obtained if using a discrete halo model.
         This is a list of halo masses and coordinates for the dark matter halos.
+    perturbed_field: :class:`~PerturbedField`, optional
+        The perturbed field at the current redshift. Becomes relevant only for Eulerian source models.
     previous_spin_temp : :class:`TsBox`, optional
         The previous spin temperature box. Used for feedback when USE_MINI_HALOS==True
     previous_ionize_box: :class:`IonizedBox` or None
@@ -349,6 +354,31 @@ def compute_halo_grid(
             )
         else:
             halo_catalog = HaloCatalog.dummy()
+
+    if initial_conditions is None:
+        if inputs.matter_options.lagrangian_source_grid:
+            raise ValueError(
+                f"You must provide initial_conditions for SOURCE_MODEL = {inputs.matter_options.SOURCE_MODEL}"
+            )
+        elif (
+            inputs.matter_options.SOURCE_MODEL == "E-INTEGRAL"
+            and inputs.astro_options.USE_MINI_HALOS
+            and inputs.matter_options.V_CB_MODEL == "FLUCTS"
+        ):
+            raise ValueError(
+                "You must provide initial_conditions for SOURCE_MODEL = E- INTEGRAL, "
+                "USE_MINI_HALOS = True and V_CB_MODEL = FLUCTS"
+            )
+        else:
+            initial_conditions = InitialConditions.dummy()
+
+    if perturbed_field is None:
+        if not inputs.matter_options.lagrangian_source_grid:
+            raise ValueError(
+                f"You must provide perturbed_field for SOURCE_MODEL = {inputs.matter_options.SOURCE_MODEL}"
+            )
+        else:
+            perturbed_field = PerturbedField.dummy()
 
     # NOTE: due to the order, we use the previous spin temp here, like spin_temperature,
     #       but UNLIKE ionize_box, which uses the current box
@@ -378,6 +408,7 @@ def compute_halo_grid(
 
     return box.compute(
         initial_conditions=initial_conditions,
+        perturbed_field=perturbed_field,
         halo_catalog=halo_catalog,
         previous_ionize_box=previous_ionize_box,
         previous_spin_temp=previous_spin_temp,
@@ -823,7 +854,7 @@ def compute_spin_temperature(
     initial_conditions: InitialConditions,
     perturbed_field: PerturbedField,
     inputs: InputParameters | None = None,
-    radiation_fields: RadiationFields | None = None,
+    radiation_fields: RadiationFields,
     previous_spin_temp: TsBox | None = None,
     cleanup: bool = False,
 ) -> TsBox:
@@ -846,7 +877,7 @@ def compute_spin_temperature(
         box. The redshift of perturb field is allowed to be different than `redshift`. If so, it
         will be interpolated to the correct redshift, which can provide a speedup compared to
         actually computing it at the desired redshift.
-    radiation_fields : :class:`RadiationFields`, optional
+    radiation_fields : :class:`RadiationFields`
         This input specifies radiation fields, i.e. X-ray heating rate, photoionization rate, and Lyman-alpha flux.
     previous_spin_temp : :class:`TsBox` or None
         The previous spin temperature box. Needed when we are beyond the first snapshot
@@ -865,34 +896,6 @@ def compute_spin_temperature(
 
     if redshift >= inputs.simulation_options.Z_HEAT_MAX:
         previous_spin_temp = TsBox.dummy()
-
-    if radiation_fields is None:
-        if inputs.matter_options.lagrangian_source_grid:
-            raise ValueError(
-                f"radiation_fields is required for SOURCE_MODEL= {inputs.matter_options.SOURCE_MODEL}"
-            )
-        else:
-            # In case of the old Eulerian source model, we use the 3D arrays of RadiationFields in the C code of SpinTemperatureBox.c.
-            # TODO: this logic will have to be changed in the future once https://github.com/21cmfast/21cmFAST/issues/668 is solved
-            # (and then radiation_fields will never be None).
-            radiation_fields = RadiationFields.new(redshift=redshift, inputs=inputs)
-            shape = radiation_fields.xray_heating_rate.shape
-
-            required_arrays = TsBox.new(
-                redshift=0, inputs=inputs
-            ).get_required_input_arrays(radiation_fields)
-
-            # Set the arrays to zero
-            for array in required_arrays:
-                # TODO: the radiation arrays below are defined as np.float64, but should be np.float32 - see https://github.com/21cmfast/21cmFAST/issues/744
-                dtype = np.float32 if "filtered" in array else np.float64
-                setattr(
-                    radiation_fields,
-                    array,
-                    Array(shape=shape, dtype=dtype)
-                    .initialize()
-                    .with_value(val=np.zeros(shape)),
-                )
 
     # Set up the box without computing anything.
     box = TsBox.new(

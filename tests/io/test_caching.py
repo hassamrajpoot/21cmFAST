@@ -128,7 +128,8 @@ class TestRunCache:
         inputs = InputParameters.from_template("simple", random_seed=12345)
         cache = caching.RunCache.from_inputs(inputs, caching.OutputCache(tmp_path))
 
-        assert cache.HaloBox is None
+        assert cache.TsBox is None
+        assert cache.RadiationFields is None
 
     def test_from_example_file(self, full_run_cache: caching.RunCache):
         """Test the from_example_file classmethod."""
@@ -199,15 +200,27 @@ class TestRunCache:
         with pytest.raises(ValueError, match="No output struct found"):
             cache.get_output_struct_at_z(kind="TsBox", z=0.0)
 
-    def test_get_all_boxes_at_z(self, full_run_cache):
+    @pytest.mark.parametrize("return_ics", [True, False])
+    def test_get_all_boxes_at_z(self, full_run_cache, return_ics):
         """Test get_all_boxes_at_z functionality."""
         cache = full_run_cache
 
         for z in cache.inputs.node_redshifts:
-            boxes = cache.get_all_boxes_at_z(z)
-            assert len(boxes) == 4  # number of structs with redshifts (PF, Ts, IB, BT)
+            boxes = cache.get_all_boxes_at_z(z, return_ics=return_ics)
+            assert (
+                "InitialConditions" in boxes
+                if return_ics
+                else "InitialConditions" not in boxes
+            )
+            assert "PerturbedField" in boxes
+            assert "HaloBox" in boxes
+            assert "RadiationFields" in boxes
+            assert "TsBox" in boxes
+            assert "IonizedBox" in boxes
+            assert "BrightnessTemp" in boxes
             for b in boxes.values():
-                assert b.redshift == z
+                if hasattr(b, "redshift"):
+                    assert b.redshift == z
 
     def test_get_coeval_at_z(self, full_run_cache):
         """Test get_coeval_at_z functionality."""

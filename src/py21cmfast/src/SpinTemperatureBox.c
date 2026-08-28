@@ -1,15 +1,12 @@
 // Re-write of find_HII_bubbles.c for being accessible within the MCMC
 #include "SpinTemperatureBox.h"
 
-#include <complex.h>
-#include <fftw3.h>
 #include <math.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 
 #include "Constants.h"
-#include "RadiationFields.h"
 #include "cosmology.h"
 #include "exceptions.h"
 #include "heating_helper_progs.h"
@@ -350,29 +347,7 @@ int ComputeTsBox(float redshift, float prev_redshift, float perturbed_field_reds
             return (0);
         }
 
-        // We compute the radiation fields in this module only for the old Eulerian source models.
-        // For the new Lagrangian source models, the radiation fields are computed in
-        // RadiationFields.c.
-        // TODO: Remove the following lines once https://github.com/21cmfast/21cmFAST/issues/668 is
-        // fixed.
-        if (source_model_uses_eulerian_grids(matter_options_global->SOURCE_MODEL)) {
-            int R_ct;
-            RadiationFieldsSetup *rad_setup = malloc(sizeof(RadiationFieldsSetup));
-            setup_radiation_fields(redshift, perturbed_field_redshift, radiation_fields, rad_setup,
-                                   perturbed_field, previous_spin_temp, ini_boxes);
-            this_spin_temp->Q_HI = rad_setup->Q_HI_zp;
-            if (!rad_setup->NO_LIGHT) {
-                for (R_ct = 0; R_ct < astro_params_global->N_STEP_TS; R_ct++) {
-                    accumulate_radiation_shell(redshift, rad_setup, radiation_fields, R_ct);
-                }
-                multiply_radiation_fields_by_constants(redshift, radiation_fields,
-                                                       perturbed_field_redshift, perturbed_field,
-                                                       previous_spin_temp);
-            }
-            free_rad_setup(rad_setup, cleanup);
-        } else {
-            this_spin_temp->Q_HI = radiation_fields->Q_HI;
-        }
+        this_spin_temp->Q_HI = radiation_fields->Q_HI;
 
         // set the constants calculated once per snapshot
         struct spintemp_from_sfr_prefactors zp_consts;

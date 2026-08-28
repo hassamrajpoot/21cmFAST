@@ -38,7 +38,8 @@ grid based source models, when the user sets ``HMF=='ST'``. All other mass funct
 rescale the Extended Press-Schechter (EPS) conditional mass function.
 
 It is also important to note that the logic for determining the turnover masses
-between v3 and v4 have changed, see more details in :doc:`M_TURN`.
+between v3 and v4 have changed, as well as the prescription for computing the radiation fields,
+see more details in :doc:`M_TURN` and :doc:`Radiation_Fields`.
 
 Input Parameters
 ================

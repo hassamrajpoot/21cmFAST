@@ -38,6 +38,7 @@ void set_scaling_constants(double redshift, ScalingConstants *consts, bool use_p
 
     // Set on for the fixed grid case since we are missing halos above the cell mass
     consts->fix_mean =
+        source_model_uses_eulerian_grids(matter_options_global->SOURCE_MODEL) ||
         matter_options_global->HMF == HMF_WATSON || matter_options_global->HMF == HMF_WATSON_Z ||
         matter_options_global->HMF == HMF_REED07 || matter_options_global->HMF == HMF_YUNG24;
     // whether to fix *integrated* (not sampled) galaxy properties to the expected mean

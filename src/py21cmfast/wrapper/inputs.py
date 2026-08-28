@@ -2080,10 +2080,7 @@ class InputParameters:
                 raise ValueError(
                     f"USE_EXP_FILTER is not compatible with SOURCE_MODEL == {self.matter_options.SOURCE_MODEL}"
                 )
-            if val.LYA_MULTIPLE_SCATTERING:
-                raise ValueError(
-                    f"LYA_MULTIPLE_SCATTERING is not compatible with SOURCE_MODEL == {self.matter_options.SOURCE_MODEL}"
-                )
+
         if (
             not self.matter_options.has_discrete_halos
             and val.USE_UPPER_STELLAR_TURNOVER
@@ -2517,17 +2514,20 @@ class InputParameters:
 
 
 def check_halomass_range(inputs: InputParameters) -> None:
-    """Check that the halo mass range is sensible given the parameters.
+    """Check that the halo mass range is sensible given the parameters, when there are discrete halos in the simulation.
 
-    This function checks that the minimum halo mass set by the various resolutions
-    and flags does not have any gaps. We raise an error if there is a gap, and a warning
-    if it is above the turnover mass.
+    We raise an error if there is a gap in the simulated halo mass range,
+    and a warning if the largest halo mass is below the maximum integral mass (without discrete halos).
     """
     # There are no problems if we are not using halos
-    if not inputs.matter_options.lagrangian_source_grid:
+    if not inputs.matter_options.has_discrete_halos:
         return
 
-    # simplified behaviour of lib.minimum_source_mass()
+    # Decide if we have sampled halos (not just dexm)
+    has_sampled_halos = inputs.matter_options.SOURCE_MODEL == "CHMF-SAMPLER"
+    min_sampler = inputs.simulation_options.SAMPLER_MIN_MASS * un.M_sun
+
+    # Simplified behaviour of lib.minimum_source_mass() for source models with discrete halos
     if inputs.astro_options.USE_MINI_HALOS:
         min_integral_mass = 1e5 * un.M_sun
     else:
@@ -2535,72 +2535,56 @@ def check_halomass_range(inputs: InputParameters) -> None:
             max(inputs.astro_params.cdict["M_TURN_STELLAR_FEEDBACK"] / 50, 1e5)
             * un.M_sun
         )
-    max_integral_mass = 1e16 * un.M_sun  # define macro in hmf.h
+    # Set maximum integral mass
+    MAX_INTEGRAL_MASS = 1e16 * un.M_sun  # define macro in hmf.h
 
+    # Get lowres and hires cell mass: the former (latter) is only used with (without) the sampler
+    # Also set maximum integral mass, according to the C code in ComputeHaloBox
     massdens = inputs.cosmo_params.cosmo.critical_density(0) * inputs.cosmo_params.OMm
-    hires_cell_mass = (massdens * inputs.simulation_options.cell_size_hires**3).to(
+    if has_sampled_halos:
+        lowres_cell_mass = (massdens * inputs.simulation_options.cell_size**3).to(
+            un.M_sun
+        )
+        max_integral_mass = min_sampler
+
+    else:
+        hires_cell_mass = (massdens * inputs.simulation_options.cell_size_hires**3).to(
+            un.M_sun
+        )
+        max_integral_mass = hires_cell_mass
+
+    # Decide if we have integrals (not just dexm)
+    has_integrals = min_integral_mass < max_integral_mass
+
+    # Set dexm mass range
+    min_dexm = lowres_cell_mass if has_sampled_halos else hires_cell_mass
+    max_dexm = (massdens * (inputs.simulation_options.BOX_LEN * un.Mpc) ** 3).to(
         un.M_sun
     )
-    lores_cell_mass = (massdens * inputs.simulation_options.cell_size**3).to(un.M_sun)
-    pt_cell_mass = (
-        hires_cell_mass
-        if inputs.matter_options.PERTURB_ON_HIGH_RES
-        else lores_cell_mass
-    )
+    mass_limits = ((min_dexm, max_dexm),)
+    names = ("dexm",)
 
-    has_dexm_halos = inputs.matter_options.SOURCE_MODEL in ["DEXM-ESF", "CHMF-SAMPLER"]
-    has_sampled_halos = inputs.matter_options.SOURCE_MODEL == "CHMF-SAMPLER"
-    has_integrals = (
-        min_integral_mass / un.M_sun < inputs.simulation_options.SAMPLER_MIN_MASS
-    )
-
-    min_cellint = min_integral_mass
-    if inputs.matter_options.SOURCE_MODEL == "CHMF-SAMPLER":
-        max_cellint = inputs.simulation_options.SAMPLER_MIN_MASS * un.M_sun
-    elif inputs.matter_options.SOURCE_MODEL == "DEXM-ESF":
-        max_cellint = hires_cell_mass
-    else:
-        max_cellint = max_integral_mass
-
-    max_cellint = min(max_cellint, pt_cell_mass)
-
-    min_sampler = inputs.simulation_options.SAMPLER_MIN_MASS * un.M_sun
-    # if the cell is smaller, the sampler won't draw any halos
-    max_sampler = max(lores_cell_mass, min_sampler)
-
-    min_dexm = lores_cell_mass if has_sampled_halos else hires_cell_mass
-    # not the real maximum, (7 sigma), but sufficient for our checks here
-    max_dexm = 1e16 * un.M_sun
-
-    mass_limits = ()
-    names = ()
-    if has_integrals:
-        mass_limits += ((min_cellint, max_cellint),)
-        names += ("integrals",)
+    # Now add the other mass ranges, if relevant
     if has_sampled_halos:
+        # if the cell is smaller, the sampler won't draw any halos
+        max_sampler = max(lowres_cell_mass, min_sampler)
         mass_limits += ((min_sampler, max_sampler),)
         names += ("sampler",)
-    if has_dexm_halos:
-        mass_limits += ((min_dexm, max_dexm),)
-        names += ("dexm",)
+    if has_integrals:
+        mass_limits += ((min_integral_mass, max_integral_mass),)
+        names += ("integrals",)
 
     for i in range(len(mass_limits) - 1):
-        if mass_limits[i][1] != mass_limits[i + 1][0]:
+        if mass_limits[i][0] != mass_limits[i + 1][1]:
+            # NOTE: this should be triggered only if the sampler min mass is greater than lowres_cell_mass
             raise ValueError(
                 f"There is a gap/overlap in the halo mass ranges of {dict(zip(names, mass_limits, strict=False))}. "
                 "This will lead to unphysical results. Please adjust your parameters to remove this gap."
             )
 
-    if min(min(mass_limits)) > min_integral_mass:
+    if max_dexm < MAX_INTEGRAL_MASS:
         warnings.warn(
-            f"The minimum halo mass {min(min(mass_limits)):.2e} is high compared to the turnover {inputs.astro_params.cdict['M_TURN_STELLAR_FEEDBACK']:.2e}. "
-            f"Halos below {min(min(mass_limits)):.2e} will not be accounted for in the simulation.",
-            stacklevel=2,
-        )
-
-    if max(max(mass_limits)) < max_integral_mass:
-        warnings.warn(
-            f"The maximum halo mass {max(max(mass_limits)):.2e} is below the integral mass {max_integral_mass:.2e}. "
-            f"Halos above {max(max(mass_limits)):.2e} will not be accounted for in the simulation.",
+            f"The maximum halo mass {max_dexm:.2e} is below the maximum integral mass {MAX_INTEGRAL_MASS:.2e} (without halos). "
+            f"Halos above {max_dexm:.2e} will not be accounted for in the simulation.",
             stacklevel=2,
         )

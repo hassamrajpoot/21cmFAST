@@ -794,34 +794,33 @@ def _redshift_loop_generator(
             this_perturbed_field = perturbed_field[iz]
             this_perturbed_field.load_all()
 
-            if inputs.matter_options.lagrangian_source_grid:
-                if inputs.matter_options.has_discrete_halos:
-                    this_halofield = halofield_list[iz]
-                    this_halofield.load_all()
-                this_halobox = sf.compute_halo_grid(
-                    inputs=inputs,
-                    halo_catalog=this_halofield,
-                    redshift=z,
-                    previous_ionize_box=getattr(prev_coeval, "ionized_box", None),
-                    previous_spin_temp=getattr(prev_coeval, "ts_box", None),
-                    write=write.halobox,
-                    **kw,
-                )
+            if inputs.matter_options.has_discrete_halos:
+                this_halofield = halofield_list[iz]
+                this_halofield.load_all()
+            this_halobox = sf.compute_halo_grid(
+                inputs=inputs,
+                halo_catalog=this_halofield,
+                redshift=z,
+                perturbed_field=this_perturbed_field,
+                previous_ionize_box=getattr(prev_coeval, "ionized_box", None),
+                previous_spin_temp=getattr(prev_coeval, "ts_box", None),
+                write=write.halobox,
+                **kw,
+            )
 
             if inputs.astro_options.USE_TS_FLUCT:
-                if inputs.matter_options.lagrangian_source_grid:
-                    # append the halo redshift array so we have all halo boxes [z,zmax]
-                    this_radiation_fields = sf.compute_radiation_fields(
-                        redshift=z,
-                        hboxes=[*hbox_arr, this_halobox],
-                        previous_ionize_box=getattr(prev_coeval, "ionized_box", None),
-                        previous_spin_temp=getattr(prev_coeval, "ts_box", None),
-                        perturbed_field=this_perturbed_field,
-                        initial_conditions=initial_conditions,
-                        cleanup=(cleanup and z == all_redshifts[-1]),
-                        write=write.radiation_fields,
-                        **iokw,
-                    )
+                # append the halo redshift array so we have all halo boxes [z,zmax]
+                this_radiation_fields = sf.compute_radiation_fields(
+                    redshift=z,
+                    hboxes=[*hbox_arr, this_halobox],
+                    previous_ionize_box=getattr(prev_coeval, "ionized_box", None),
+                    previous_spin_temp=getattr(prev_coeval, "ts_box", None),
+                    perturbed_field=this_perturbed_field,
+                    initial_conditions=initial_conditions,
+                    cleanup=(cleanup and z == all_redshifts[-1]),
+                    write=write.radiation_fields,
+                    **iokw,
+                )
 
                 this_spin_temp = sf.compute_spin_temperature(
                     inputs=inputs,
@@ -837,8 +836,7 @@ def _redshift_loop_generator(
                 #       it is not as huge as it was before, but it does contain some extra boxes that are no longer required
                 #       once the spin temperature is computed. These boxes however contain some interesting quantities (radiation fields!),
                 #       we should consider keeping them, but probably as part of working on https://github.com/21cmfast/21cmFAST/issues/642
-                if inputs.matter_options.lagrangian_source_grid:
-                    this_radiation_fields.purge(force=True)
+                this_radiation_fields.purge(force=True)
 
             this_ionized_box = sf.compute_ionization_field(
                 inputs=inputs,
@@ -876,7 +874,6 @@ def _redshift_loop_generator(
 
             if (
                 prev_coeval is not None
-                and inputs.matter_options.lagrangian_source_grid
                 and write.halobox
                 and iz + 1 < len(all_redshifts)
             ):

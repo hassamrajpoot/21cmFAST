@@ -643,20 +643,6 @@ class TestInputParameters:
         ),
         (
             ValueError,
-            "LYA_MULTIPLE_SCATTERING is not compatible with SOURCE_MODEL == E-INTEGRAL",
-            {
-                "matter_options": MatterOptions(
-                    SOURCE_MODEL="E-INTEGRAL",
-                ),
-                "astro_options": AstroOptions(
-                    LYA_MULTIPLE_SCATTERING=True,
-                    USE_EXP_FILTER=False,
-                    USE_UPPER_STELLAR_TURNOVER=False,
-                ),
-            },
-        ),
-        (
-            ValueError,
             "USE_EXP_FILTER is not compatible with SOURCE_MODEL == E-INTEGRAL",
             {
                 "matter_options": MatterOptions(
@@ -917,11 +903,8 @@ class TestInputParameters:
             UserWarning,
             match="The maximum halo mass",
         ):
-            # The cell size is ~1e11 Msun
-            self.default.evolve_input_structs(
-                SOURCE_MODEL="L-INTEGRAL",
-                USE_UPPER_STELLAR_TURNOVER=False,
-            )
+            # The box size is too small to have very large halos
+            self.default.evolve_input_structs(BOX_LEN=50.0)
 
     def test_linear_node_redshifts(self):
         """Test that with_linear_redshifts works as expected."""
