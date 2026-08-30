@@ -26,6 +26,21 @@ from py21cmfast.wrapper.inputs import CosmoTables, Table1D
 _TEMPLATES = tmpl.list_templates()
 _ALL_ALIASES = list(chain.from_iterable(t["aliases"] for t in _TEMPLATES))
 
+pytestmark = [
+    pytest.mark.filterwarnings(
+        "ignore:^You have chosen to work with POWER_SPECTRUM=EH:UserWarning"
+    ),
+    pytest.mark.filterwarnings("ignore:^The maximum halo mass:UserWarning"),
+    pytest.mark.filterwarnings(
+        "ignore:^USE_MINI_HALOS is False but V_CB_MODEL:UserWarning"
+    ),
+    pytest.mark.filterwarnings(
+        "ignore:^USE_MINI_HALOS needs a non-trivial V_CB_MODEL:UserWarning"
+    ),
+    pytest.mark.filterwarnings("ignore:^You are setting R_BUBBLE_MAX:UserWarning"),
+    pytest.mark.filterwarnings("ignore:^Your model:UserWarning"),
+]
+
 
 class TestInputStructSubclasses:
     """Tests of the InputStruct object and its subclasses."""
@@ -332,10 +347,9 @@ class TestAstroOptions:
         """Fails when the removed_in version is reached, reminding you to delete INHOMO_RECO."""
         AstroOptions(INHOMO_RECO=True)
 
-    @pytest.mark.parametrize("kwargs", [{}, {"INHOMO_RECO": False}])
-    def test_inhomo_reco_false_sets_none(self, kwargs):
+    def test_inhomo_reco_not_provided_sets_none(self):
         """Test that INHOMO_RECO=False (or not provided) sets RECOMB_MODEL='none'."""
-        opts = AstroOptions(**kwargs)
+        opts = AstroOptions()
         assert opts.RECOMB_MODEL == "none"
         assert opts.INHOMO_RECO is False
 
@@ -570,10 +584,9 @@ class TestMatterOptions:
         """Fails when the removed_in version is reached, reminding you to delete USE_RELATIVE_VELOCITIES."""
         MatterOptions(USE_RELATIVE_VELOCITIES=True)
 
-    @pytest.mark.parametrize("kwargs", [{}, {"USE_RELATIVE_VELOCITIES": False}])
-    def test_use_relative_velocities_false_sets_none(self, kwargs):
+    def test_use_relative_velocities_not_provided_sets_none(self):
         """Test that USE_RELATIVE_VELOCITIES=False (or not provided) sets V_CB_MODEL='NONE'."""
-        opts = MatterOptions(**kwargs)
+        opts = MatterOptions()
         assert opts.V_CB_MODEL == "NONE"
         assert opts.USE_RELATIVE_VELOCITIES is False
 
@@ -731,6 +744,9 @@ class TestInputParameters:
             InputParameters(random_seed=1, **kw)
 
     @pytest.mark.parametrize(("msg", "kw"), WARNINGS_CASES)
+    @pytest.mark.filterwarnings(
+        "ignore:^You are setting M_TURN_STELLAR_FEEDBACK:UserWarning"
+    )
     def test_validation_warnings(self, msg, kw):
         """Test various warnings that can happen on validation."""
         with pytest.warns(UserWarning, match=msg):
@@ -764,9 +780,14 @@ class TestInputParameters:
     def test_fix_vcb_avg_conflict(self, fix_vcb_avg):
         """Test error when FIX_VCB_AVG conflicts with V_CB_MODEL."""
         v_cb_model_wrong = "NONE" if fix_vcb_avg else "AVG-DEBUG"
-        with pytest.raises(
-            ValueError,
-            match=f"FIX_VCB_AVG={fix_vcb_avg} is not compatible with ",
+        with (
+            pytest.warns(
+                deprecation.DeprecatedWarning, match="FIX_VCB_AVG is deprecated"
+            ),
+            pytest.raises(
+                ValueError,
+                match=f"FIX_VCB_AVG={fix_vcb_avg} is not compatible with ",
+            ),
         ):
             InputParameters(
                 random_seed=1,

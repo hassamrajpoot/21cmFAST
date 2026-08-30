@@ -17,6 +17,12 @@ from py21cmfast import (
 from py21cmfast.io import caching, h5
 from py21cmfast.wrapper import outputs
 
+pytestmark = [
+    pytest.mark.filterwarnings("ignore:^Resolution is likely too low:UserWarning"),
+    pytest.mark.filterwarnings("ignore:^The maximum halo mass:UserWarning"),
+    pytest.mark.filterwarnings("ignore:^Your R_BUBBLE_MAX is > BOX_LEN:UserWarning"),
+]
+
 
 def create_full_run_cache(cachedir: Path) -> caching.RunCache:
     inputs = InputParameters.from_template(

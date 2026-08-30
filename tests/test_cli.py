@@ -12,6 +12,12 @@ from py21cmfast._templates import create_params_from_template
 from py21cmfast.cli import Parameters, ParameterSelection, RunParams, _run_setup, app
 from py21cmfast.io.h5 import read_output_struct
 
+pytestmark = [
+    pytest.mark.filterwarnings("ignore:^You are setting R_BUBBLE_MAX:UserWarning"),
+    pytest.mark.filterwarnings("ignore:.*USE_TS_FLUCT.*:UserWarning"),
+    pytest.mark.filterwarnings("ignore:^Your model:UserWarning"),
+]
+
 
 def app_noexit(*args, **kwargs):
     """Return the CLI app with SystemExit disabled for testing."""
@@ -275,6 +281,7 @@ class TestRunICS:
         ics = read_output_struct(outfile)
         assert ics.simulation_options.HII_DIM == 32
 
+    @pytest.mark.filterwarnings("default:Resolution is likely too low:UserWarning")
     def test_warn_formatting(self, tmp_path, capsys):
         """Test that warnings are printed properly."""
         app_noexit(

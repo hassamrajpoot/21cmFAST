@@ -23,6 +23,17 @@ from py21cmfast.wrapper.exceptions import ArgumentValueError
 from . import test_c_interpolation_tables as cint
 from .produce_integration_test_data import get_all_options_struct, print_failure_stats
 
+pytestmark = [
+    pytest.mark.filterwarnings(
+        "ignore:divide by zero encountered in log:RuntimeWarning"
+    ),
+    pytest.mark.filterwarnings(
+        "ignore:invalid value encountered in divide:RuntimeWarning"
+    ),
+    pytest.mark.filterwarnings("ignore:binned_cmf:UserWarning"),
+    pytest.mark.filterwarnings("ignore:^The maximum halo mass:UserWarning"),
+]
+
 RELATIVE_TOLERANCE = 1e-1
 
 options_hmf = list(cint.OPTIONS_HMF.keys())
@@ -360,19 +371,23 @@ def test_halo_buffer_overflow_error_message(default_input_struct):
         stderr_path.unlink()
 
 
+@pytest.mark.filterwarnings(
+    "ignore:^You are setting M_TURN_STELLAR_FEEDBACK:UserWarning"
+)
 def test_perturb_halos(default_input_struct_ts):
     # inputs which get all the fields
     # TODO: this test seems to pass only when USE_REIONIZATION_PHOTOHEATING_FEEDBACK is True, and it fails with False, I am not sure why
-    inputs_test = default_input_struct_ts.evolve_input_structs(
-        SOURCE_MODEL="CHMF-SAMPLER",
-        SAMPLER_MIN_MASS=5e9,
-        PERTURB_ON_HIGH_RES=True,
-        RECOMB_MODEL="inhomogeneous",
-        USE_MINI_HALOS=True,
-        V_CB_MODEL="FLUCTS",
-        POWER_SPECTRUM="CLASS",
-        USE_REIONIZATION_PHOTOHEATING_FEEDBACK=True,
-    )
+    with pytest.warns(UserWarning, match="R_BUBBLE_MAX"):
+        inputs_test = default_input_struct_ts.evolve_input_structs(
+            SOURCE_MODEL="CHMF-SAMPLER",
+            SAMPLER_MIN_MASS=5e9,
+            PERTURB_ON_HIGH_RES=True,
+            RECOMB_MODEL="inhomogeneous",
+            USE_MINI_HALOS=True,
+            V_CB_MODEL="FLUCTS",
+            POWER_SPECTRUM="CLASS",
+            USE_REIONIZATION_PHOTOHEATING_FEEDBACK=True,
+        )
     ics = compute_initial_conditions(
         inputs=inputs_test,
     )

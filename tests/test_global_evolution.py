@@ -2,6 +2,7 @@
 
 from pathlib import Path
 
+import deprecation
 import numpy as np
 import pytest
 
@@ -9,6 +10,15 @@ import py21cmfast as p21c
 from py21cmfast import GlobalEvolution
 
 DATA_PATH = Path(__file__).parent / "test_data"
+
+pytestmark = [
+    pytest.mark.filterwarnings("ignore:^The maximum halo mass:UserWarning"),
+    pytest.mark.filterwarnings("ignore:.*USE_TS_FLUCT.*:UserWarning"),
+    pytest.mark.filterwarnings("ignore:^Your model:UserWarning"),
+    pytest.mark.filterwarnings(
+        "ignore:^You have chosen to work with POWER_SPECTRUM:UserWarning"
+    ),
+]
 
 
 @pytest.mark.parametrize("source_model", ["CONST-ION-EFF", "E-INTEGRAL", "L-INTEGRAL"])
@@ -116,6 +126,9 @@ def test_global_evolution_bad_inputs(default_input_struct_ts, source_model):
             )
 
 
+@pytest.mark.filterwarnings(
+    "ignore:^USE_MINI_HALOS needs a non-trivial V_CB_MODEL:UserWarning"
+)
 def test_compatability_with_database():
     """
     Test that loading GlobalEvolution from the database succeeds.
@@ -127,7 +140,8 @@ def test_compatability_with_database():
     are absolutely sure of what you are doing.
     """
     fname = DATA_PATH / "global_evolution.h5"
-    global_evolution = GlobalEvolution.from_file(fname)
+    with pytest.warns(deprecation.DeprecatedWarning):
+        global_evolution = GlobalEvolution.from_file(fname)
     assert isinstance(global_evolution, GlobalEvolution)
 
 

@@ -26,6 +26,25 @@ YUNG24_PHYSICAL_PARAMS = {
     "c_2": -0.00033074,
 }
 
+pytestmark = [
+    pytest.mark.filterwarnings(
+        "ignore:^A selection of a mass function other than:UserWarning"
+    ),
+    pytest.mark.filterwarnings(
+        "ignore:^USE_MINI_HALOS is False but V_CB_MODEL:UserWarning"
+    ),
+    pytest.mark.filterwarnings(
+        "ignore:^USE_MINI_HALOS needs a non-trivial V_CB_MODEL:UserWarning"
+    ),
+    pytest.mark.filterwarnings("ignore:^You are setting R_BUBBLE_MAX:UserWarning"),
+    pytest.mark.filterwarnings(
+        "ignore:^USE_MINI_HALOS is False, so only ACG LFs:UserWarning"
+    ),
+    pytest.mark.filterwarnings(
+        "ignore:^You are setting M_TURN_STELLAR_FEEDBACK:UserWarning"
+    ),
+]
+
 
 @pytest.fixture(scope="module")
 def default_input_struct_lc_mini(default_input_struct_lc):

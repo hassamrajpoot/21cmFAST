@@ -46,6 +46,8 @@ def test_coeval_lowerz_than_photon_cons(
         )
 
 
+@pytest.mark.filterwarnings("ignore:Trying to purge array:UserWarning")
+@pytest.mark.filterwarnings("ignore:^The maximum halo mass:UserWarning")
 def test_coeval_warnings(default_input_struct_lc, cache):
     # test for no caching with halo fields
     inputs = default_input_struct_lc.evolve_input_structs(

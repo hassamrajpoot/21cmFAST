@@ -1,11 +1,21 @@
 """Tests of the input_serialization module."""
 
+import warnings
 from typing import Literal
 
 import pytest
 
 from py21cmfast import InputParameters
 from py21cmfast import input_serialization as srlz
+
+# Filter collection-time warning from parametrize decorator creating InputParameters at module level
+warnings.filterwarnings(
+    "ignore",
+    message="^The maximum halo mass",
+    category=UserWarning,
+)
+
+pytestmark = pytest.mark.filterwarnings("ignore:^The maximum halo mass:UserWarning")
 
 
 class TestConvertInputsToDict:
