@@ -8,12 +8,17 @@ import pytest
 from py21cmfast import InputParameters
 from py21cmfast import input_serialization as srlz
 
-# Filter collection-time warning from parametrize decorator creating InputParameters at module level
-warnings.filterwarnings(
-    "ignore",
-    message="^The maximum halo mass",
-    category=UserWarning,
-)
+with warnings.catch_warnings():
+    warnings.filterwarnings(
+        "ignore", message="^The maximum halo mass", category=UserWarning
+    )
+    _ROUNDTRIP_INPUTS = [
+        InputParameters(random_seed=0),
+        InputParameters.from_template("Park19", random_seed=0),
+        InputParameters.from_template(
+            "default", HII_DIM=50, DIM=100, BOX_LEN=50, random_seed=0
+        ),
+    ]
 
 pytestmark = pytest.mark.filterwarnings("ignore:^The maximum halo mass:UserWarning")
 
@@ -87,13 +92,7 @@ class TestPrepareInputsForSerialization:
 
     @pytest.mark.parametrize(
         "inputs",
-        [
-            InputParameters(random_seed=0),
-            InputParameters.from_template("Park19", random_seed=0),
-            InputParameters.from_template(
-                "default", HII_DIM=50, DIM=100, BOX_LEN=50, random_seed=0
-            ),
-        ],
+        _ROUNDTRIP_INPUTS,
         ids=[
             "default",
             "park19",

@@ -14,7 +14,9 @@ from py21cmfast.io.h5 import read_output_struct
 
 pytestmark = [
     pytest.mark.filterwarnings("ignore:^You are setting R_BUBBLE_MAX:UserWarning"),
-    pytest.mark.filterwarnings("ignore:.*USE_TS_FLUCT.*:UserWarning"),
+    pytest.mark.filterwarnings(
+        "ignore:^Your inputs.astro_options.USE_TS_FLUCT:UserWarning"
+    ),
     pytest.mark.filterwarnings("ignore:^Your model:UserWarning"),
 ]
 

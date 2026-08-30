@@ -13,7 +13,9 @@ DATA_PATH = Path(__file__).parent / "test_data"
 
 pytestmark = [
     pytest.mark.filterwarnings("ignore:^The maximum halo mass:UserWarning"),
-    pytest.mark.filterwarnings("ignore:.*USE_TS_FLUCT.*:UserWarning"),
+    pytest.mark.filterwarnings(
+        "ignore:^Your inputs.astro_options.USE_TS_FLUCT:UserWarning"
+    ),
     pytest.mark.filterwarnings("ignore:^Your model:UserWarning"),
     pytest.mark.filterwarnings(
         "ignore:^You have chosen to work with POWER_SPECTRUM:UserWarning"
