@@ -21,6 +21,7 @@ where `ic.hires_density.mean()` worked but `ic.hires_density ** 2` did not.
 import copy
 import logging
 import pickle
+from collections.abc import Callable
 
 import attrs
 import deprecation
@@ -28,7 +29,7 @@ import numpy as np
 import pytest
 from astropy import units as un
 
-from py21cmfast import InitialConditions, config
+from py21cmfast import InitialConditions, InputParameters, TsBox, config
 from py21cmfast.wrapper.arrays import (
     Array,
     ArrayProxy,
@@ -691,3 +692,115 @@ def test_legacy_view_does_not_propagate_into_derived_arrays(in_memory_array, raw
     # Slices keep the type (numpy insists) but must not answer the legacy API.
     with pytest.raises(AttributeError):
         _ = view[0].state
+
+
+@pytest.fixture
+def temperature_box(default_input_struct: InputParameters) -> TsBox:
+    """Create a real output struct with synthetic, computed temperature data."""
+    box = TsBox.new(inputs=default_input_struct, redshift=10)
+    array = box.arrays["spin_temperature"]
+    box.spin_temperature = np.ones(array.shape, dtype=array.dtype)
+    return box
+
+
+def test_direct_quantity_access_preserves_raw_field_and_copy_contract(
+    temperature_box: TsBox,
+) -> None:
+    field = temperature_box.spin_temperature
+    quantity = field.get_quantity()
+    independent = field.get_quantity(copy=True)
+    assert isinstance(field, np.ndarray)
+    assert not isinstance(field, un.Quantity)
+    assert not hasattr(field, "unit")
+    assert not hasattr(field, "description")
+    assert quantity.unit == temperature_box.arrays["spin_temperature"].unit == un.K
+    assert quantity.dtype == independent.dtype == field.dtype
+    assert np.shares_memory(quantity, field)
+    assert not np.shares_memory(independent, field)
+    assert not quantity.flags.writeable
+    assert independent.flags.writeable
+    assert field.flags.writeable
+    with pytest.raises(ValueError, match="read-only"):
+        quantity <<= un.mK
+    field.flat[0] = 3
+    assert quantity.flat[0] == 3 * un.K
+    assert independent.flat[0] == 1 * un.K
+
+
+@pytest.mark.parametrize(
+    "operation", [lambda a: a + 1, lambda a: a[:1]], ids=["arithmetic", "slice"]
+)
+def test_direct_quantity_access_does_not_follow_derived_raw_arrays(
+    temperature_box: TsBox, operation: Callable[[np.ndarray], np.ndarray]
+) -> None:
+    field = temperature_box.spin_temperature
+    derived = operation(field)
+    np.testing.assert_array_equal(derived, operation(np.asarray(field)))
+    assert not hasattr(derived, "unit")
+    assert not hasattr(derived, "get_quantity")
+
+
+def test_direct_quantity_access_uses_observed_values_after_field_replacement(
+    temperature_box: TsBox,
+) -> None:
+    old_field = temperature_box.spin_temperature
+    old_shape = old_field.shape
+    temperature_box.spin_temperature = Array(
+        old_shape, dtype=old_field.dtype, unit=un.mK, description="Temperature."
+    ).with_value(np.full(old_shape, 2000, dtype=old_field.dtype))
+    assert old_field.get_quantity().flat[0] == 1 * un.K
+    assert temperature_box.spin_temperature.get_quantity().flat[0] == 2000 * un.mK
+
+
+@pytest.mark.parametrize("cache_on_access", [False, True])
+def test_direct_quantity_access_uses_resolved_data_without_rereading(
+    temperature_box: TsBox, cache_on_access: bool
+) -> None:
+    array = temperature_box.arrays["spin_temperature"]
+    backend = _FakeBackend(np.asarray(array))
+    temperature_box.spin_temperature = array.purged_to_disk(backend)
+    with config.use(CACHE_ARRAYS_ON_ACCESS=cache_on_access):
+        field = temperature_box.spin_temperature
+        assert backend.read_count == 1
+        assert (
+            temperature_box.arrays["spin_temperature"].state.computed_in_mem
+            == cache_on_access
+        )
+        for _ in range(2):
+            np.testing.assert_array_equal(field.get_quantity().value, 1)
+        assert backend.read_count == 1
+
+
+def test_direct_quantity_access_rejects_unknown_legacy_units(
+    temperature_box: TsBox,
+) -> None:
+    array = temperature_box.arrays["spin_temperature"]
+    legacy = object.__new__(Array)
+    legacy.__setstate__(
+        {
+            key: value
+            for key, value in array.__dict__.items()
+            if key not in {"unit", "description"}
+        }
+    )
+    temperature_box.spin_temperature = legacy
+    field = temperature_box.spin_temperature
+    np.testing.assert_array_equal(field, 1)
+    with pytest.raises(ValueError, match="Unit metadata is not defined"):
+        field.get_quantity()
+
+
+def test_quantity_converted_to_stored_unit_can_be_assigned(
+    default_input_struct_lc: InputParameters,
+) -> None:
+    box = TsBox.new(inputs=default_input_struct_lc, redshift=10.0)
+    field = box.arrays["spin_temperature"]
+    box.spin_temperature = np.ones(field.shape, dtype=np.float32)
+
+    converted = box.arrays["spin_temperature"].get_quantity().to(un.mK)
+    converted += 1000 * un.mK
+    box.spin_temperature = converted.to_value(field.unit)
+
+    assert box.arrays["spin_temperature"].unit == un.K
+    assert box.spin_temperature.dtype == np.float32
+    np.testing.assert_array_equal(box.spin_temperature, 2.0)

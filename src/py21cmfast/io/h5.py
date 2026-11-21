@@ -32,6 +32,7 @@ structure::
 """
 
 import warnings
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -39,6 +40,7 @@ import attrs
 import deprecation
 import h5py
 import numpy as np
+from astropy import units as un
 from packaging.version import Version
 
 from .. import __version__
@@ -69,6 +71,16 @@ def hdf5_to_dict(grp: h5py.Group) -> dict[str, Any]:
 
 class HDF5FileStructureError(ValueError):
     """An error in the structure of an HDF5 file for 21cmFAST."""
+
+
+@lru_cache(maxsize=128)
+def _cached_unit(unit: str) -> un.UnitBase:
+    """Reuse parsed metadata units, without retaining any array data.
+
+    Astropy normalization can create collectable unit cycles. As in the output
+    constructors, reuse unit objects rather than constructing them on every read.
+    """
+    return un.Unit(unit)
 
 
 def write_output_to_hdf5(
@@ -223,11 +235,21 @@ def write_outputs_to_group(
         output.load_all()
 
     for k, array in output.arrays.items():
+        if (
+            array.unit is None
+            or not isinstance(array.description, str)
+            or not array.description.strip()
+        ):
+            raise ValueError(
+                f"Cannot write Array {k} without unit and description metadata."
+            )
         backend = H5Backend(group.file.filename, f"{group.name}/{k}")
         if keep_in_memory:
             new = array.written_to_disk(backend)
         else:
             new = array.loaded_from_disk().purged_to_disk(backend)
+        group[k].attrs["unit"] = array.unit.to_string()
+        group[k].attrs["description"] = array.description
         setattr(output, k, new)
 
     for k in output._struct.primitive_fields:
@@ -350,6 +372,8 @@ def _read_raw_output_struct(
                     backend=H5Backend(path=fl.filename, dataset=dataset.name),
                     shape=dataset.shape,
                     dtype=dataset.dtype,
+                    unit=dataset.attrs.get("unit"),
+                    description=dataset.attrs.get("description"),
                 )
                 for name, dataset in fields.items()
                 if isinstance(dataset, h5py.Dataset)
@@ -426,7 +450,11 @@ def _output_struct_from_raw(
             )
             continue
 
-        setattr(obj, name, _array_from_source(raw.arrays.pop(name), array, name))
+        setattr(
+            obj,
+            name,
+            _array_from_source(raw.arrays.pop(name), array, name, raw.version),
+        )
 
     # Arrays known to the class, but not used with these parameters by the current
     # version (e.g. because it saves less), are dropped. Others are unknown.
@@ -443,8 +471,21 @@ def _output_struct_from_raw(
 
 
 def _array_from_source(
-    source: _compat_framework.ArraySource, array: Array, name: str
+    source: _compat_framework.ArraySource, array: Array, name: str, version: Version
 ) -> Array:
+    """Restore a field from a converted file, using its declared native unit.
+
+    Parameters
+    ----------
+    source
+        Stored values or a pointer to their dataset and metadata.
+    array
+        Current field declaration, including shape, dtype, and native unit.
+    name
+        Field name included in validation errors.
+    version
+        Version that wrote the source file, for missing-metadata compatibility.
+    """
     if source.shape != array.shape:
         filename = (
             f" in the file {source.backend.path}"
@@ -458,6 +499,18 @@ def _array_from_source(
 
     # We don't check dtype because it can be usually safely cast.
     if isinstance(source, _compat_framework.ArrayOnDisk):
+        unit, description = _compat.restore_array_metadata(
+            source,
+            version,
+            unit=array.unit.to_string(),
+            description=array.description,
+        )
+        # Keep native units for subsequent C calls. Ordinary cache reads reuse the
+        # declared unit object, avoiding repeated CompositeUnit construction.
+        array = attrs.evolve(array, description=description)
+        if unit != array.unit.to_string():
+            values = un.Quantity(source.backend.read(), _cached_unit(unit), copy=False)
+            return array.with_value(values.to_value(array.unit))
         return attrs.evolve(
             array, state=ArrayState(on_disk=True), cache_backend=source.backend
         )

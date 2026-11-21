@@ -228,11 +228,17 @@ class RawInputs:
 
 @attrs.define(frozen=True)
 class ArrayOnDisk:
-    """A pointer to an array in a file (that hasn't been read into memory)."""
+    """An unread array and its optional metadata from a cache dataset.
+
+    Missing metadata is retained here so the reader can apply the compatibility
+    policy before constructing an Array. An empty unit string is dimensionless.
+    """
 
     backend: H5Backend
     shape: tuple[int, ...] = attrs.field(converter=tuple)
     dtype: np.dtype = attrs.field(converter=np.dtype)
+    unit: str | bytes | None = None
+    description: str | bytes | None = None
 
 
 #: The source of an array in a raw output struct: either a pointer to an array in a

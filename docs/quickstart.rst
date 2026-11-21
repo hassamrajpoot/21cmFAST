@@ -67,7 +67,7 @@ Units of Output Arrays
 
 Output-structure fields are NumPy arrays. Their ``Array`` handles provide unit
 metadata and Astropy quantity access. See
-:doc:`tutorials/output_units` for examples of inspecting metadata and converting
+:doc:`tutorials/coeval_cubes` for examples of inspecting metadata and converting
 units.
 
 Simulating a Lightcone

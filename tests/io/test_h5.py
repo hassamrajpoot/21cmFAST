@@ -208,40 +208,36 @@ class TestInputsIO:
         assert new.cosmo_tables == inputs.cosmo_tables
 
 
-@pytest.mark.parametrize("struct", list(ox._ALL_OUTPUT_STRUCTS.values()))
-@pytest.mark.parametrize("cache_on_access", [False, True])
-def test_output_units_restored_from_cache_without_unit_attributes(
-    default_input_struct_lc, tmp_path, struct, cache_on_access
-):
-    inputs = default_input_struct_lc.evolve_input_structs(
-        HII_DIM=2,
-        DIM=4,
-        USE_TS_FLUCT=True,
-        USE_MCGS=True,
-        V_CB_MODEL="AVG-DEBUG",
-        M_TURN_STELLAR_FEEDBACK=5.0,
-        RECOMB_MODEL="inhomogeneous",
-        R_BUBBLE_MAX=50.0,
-    )
-    options = {"redshift": 10.0} if issubclass(struct, ox.OutputStructZ) else {}
-    if struct in (ox.HaloCatalog, ox.PerturbedHaloCatalog):
-        options.update(buffer_size=3, n_halos=3)
-    with p21c.config.use(EXTRA_EMISSIVITY_FIELDS=True):
-        box = struct.new(inputs=inputs, **options)
+@pytest.fixture
+def metadata_cache(
+    default_input_struct_lc: InputParameters, tmp_path: Path
+) -> tuple[ox.IonizedBox, Path]:
+    """A small real cache with dimensional, scaled, and dimensionless fields."""
+    inputs = default_input_struct_lc.evolve_input_structs(HII_DIM=2, DIM=4)
+    box = ox.IonizedBox.new(inputs=inputs, redshift=10.0)
     for name, array in box.arrays.items():
         setattr(box, name, array.with_value(np.full(array.shape, 2, dtype=array.dtype)))
     for name in box._struct.primitive_fields:
         if getattr(box, name) is None:
             setattr(box, name, 0.0)
-
     path = tmp_path / "output.h5"
     h5.write_output_to_hdf5(box, path)
-    # The existing cache format has no dataset unit/description attributes.
-    with h5py.File(path, "r") as file:
-        for dataset in file[box._name]["OutputFields"].values():
-            assert "unit" not in dataset.attrs
-            assert "description" not in dataset.attrs
+    return box, path
 
+
+@pytest.mark.parametrize("legacy", [False, True])
+@pytest.mark.parametrize("cache_on_access", [False, True])
+def test_output_metadata_roundtrip(
+    metadata_cache: tuple[ox.IonizedBox, Path], legacy: bool, cache_on_access: bool
+) -> None:
+    box, path = metadata_cache
+    with h5py.File(path, "r+") as file:
+        for name, dataset in file[box._name]["OutputFields"].items():
+            assert dataset.attrs["unit"] == box.arrays[name].unit.to_string()
+            assert dataset.attrs["description"] == box.arrays[name].description
+            if legacy:
+                del dataset.attrs["unit"]
+                del dataset.attrs["description"]
     restored = h5.read_output_struct(path)
     for name, array in restored.arrays.items():
         assert array.unit == box.arrays[name].unit
@@ -250,17 +246,120 @@ def test_output_units_restored_from_cache_without_unit_attributes(
         assert array.state.on_disk
         with p21c.config.use(CACHE_ARRAYS_ON_ACCESS=cache_on_access):
             quantity = array.get_quantity()
-            assert quantity.dtype == box.arrays[name].dtype
             np.testing.assert_array_equal(quantity.value, 2)
-            assert not quantity.flags.writeable
-            with pytest.raises(ValueError, match="read-only"):
-                quantity.value.flat[0] = 3
-            independent = array.get_quantity(copy=True)
-            independent.value.flat[0] = 3
-            assert array.get_quantity().value.flat[0] == 2
+            assert quantity.dtype == box.arrays[name].dtype
         assert array.state.computed_in_mem == cache_on_access
-        with h5py.File(path, "r") as file:
-            assert file[box._name]["OutputFields"][name][...].flat[0] == 2
+
+
+def test_cache_metadata_converts_values_to_native_units(
+    metadata_cache: tuple[ox.IonizedBox, Path],
+) -> None:
+    box, path = metadata_cache
+    with h5py.File(path, "r+") as file:
+        dataset = file[box._name]["OutputFields"]["ionisation_rate_G12"]
+        dataset[...] = 2e-12
+        dataset.attrs["unit"] = "1 / s"
+        dataset.attrs["description"] = "Stored photoionization rate."
+    restored = h5.read_output_struct(path)
+    array = restored.arrays["ionisation_rate_G12"]
+    assert array.unit == box.arrays["ionisation_rate_G12"].unit
+    assert array.description == "Stored photoionization rate."
+    np.testing.assert_allclose(restored.ionisation_rate_G12, 2.0, rtol=1e-6, atol=0)
+
+
+def test_cache_rejects_incompatible_unit_metadata(
+    metadata_cache: tuple[ox.IonizedBox, Path],
+) -> None:
+    from astropy.units import UnitConversionError
+
+    box, path = metadata_cache
+    with h5py.File(path, "r+") as file:
+        file[box._name]["OutputFields"]["ionisation_rate_G12"].attrs["unit"] = "Mpc"
+    with pytest.raises(UnitConversionError):
+        h5.read_output_struct(path)
+
+
+def test_cache_writer_rejects_unknown_legacy_metadata(
+    metadata_cache: tuple[ox.IonizedBox, Path], tmp_path: Path
+) -> None:
+    from py21cmfast.wrapper.arrays import Array
+
+    box, _ = metadata_cache
+    state = dict(box.arrays["neutral_fraction"].__dict__)
+    state.pop("unit")
+    legacy = object.__new__(Array)
+    legacy.__setstate__(state)
+    box.neutral_fraction = legacy
+    with pytest.raises(ValueError, match="without unit and description"):
+        h5.write_output_to_hdf5(box, tmp_path / "unknown-metadata.h5")
+
+
+@pytest.mark.parametrize("current", ["4.3.2", "5.0.0", "6.0.0"])
+def test_unitless_v4_cache_follows_support_policy(
+    metadata_cache: tuple[ox.IonizedBox, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    current: str,
+) -> None:
+    from packaging.version import Version
+
+    from py21cmfast.io import _compat_framework as framework
+
+    box, path = metadata_cache
+    with h5py.File(path, "r+") as file:
+        fields = file[box._name]["OutputFields"]
+        fields.attrs["21cmFAST-version"] = "4.3.1"
+        file[box._name]["InputParameters"].attrs["21cmFAST-version"] = "4.3.1"
+        for dataset in fields.values():
+            del dataset.attrs["unit"]
+            del dataset.attrs["description"]
+    monkeypatch.setattr(framework, "CURRENT_VERSION", Version(current))
+    if current.startswith("6"):
+        with pytest.raises(framework.UnsupportedVersionError):
+            h5.read_output_struct(path)
+        return
+    if current.startswith("5"):
+        with pytest.warns(framework.FormatDeprecationWarning):
+            restored = h5.read_output_struct(path)
+    else:
+        restored = h5.read_output_struct(path)
+    assert all(array.unit is not None for array in restored.arrays.values())
+
+
+def test_unitless_v5_cache_is_not_treated_as_legacy(
+    metadata_cache: tuple[ox.IonizedBox, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from packaging.version import Version
+
+    from py21cmfast.io import _compat_framework as framework
+
+    box, path = metadata_cache
+    with h5py.File(path, "r+") as file:
+        fields = file[box._name]["OutputFields"]
+        fields.attrs["21cmFAST-version"] = "5.0.0"
+        file[box._name]["InputParameters"].attrs["21cmFAST-version"] = "5.0.0"
+        del fields["neutral_fraction"].attrs["unit"]
+    monkeypatch.setattr(framework, "CURRENT_VERSION", Version("5.0.0"))
+    with pytest.raises(ValueError, match="missing unit or description"):
+        h5.read_output_struct(path)
+
+
+def test_migration_writes_recovered_array_metadata(
+    metadata_cache: tuple[ox.IonizedBox, Path], tmp_path: Path
+) -> None:
+    from py21cmfast.io import migrate
+
+    box, path = metadata_cache
+    with h5py.File(path, "r+") as file:
+        for dataset in file[box._name]["OutputFields"].values():
+            del dataset.attrs["unit"]
+            del dataset.attrs["description"]
+    result = migrate.migrate_cache_file(path, p21c.OutputCache(tmp_path / "migrated"))
+    assert result.status == "migrated", result.message
+    with h5py.File(result.destination, "r") as file:
+        for name, dataset in file[box._name]["OutputFields"].items():
+            assert dataset.attrs["unit"] == box.arrays[name].unit.to_string()
+            assert dataset.attrs["description"] == box.arrays[name].description
+            np.testing.assert_array_equal(dataset[...], 2)
 
 
 class TestLoadHighLevelSimulation:

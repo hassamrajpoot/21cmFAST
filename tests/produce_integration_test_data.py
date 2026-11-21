@@ -12,6 +12,7 @@ fail at the tens-of-percent level.
 import logging
 import tempfile
 import warnings
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Literal
 
@@ -20,6 +21,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import tyro
 from astropy import units as un
+from powerbox import get_power
 from rich.console import Console
 from rich.rule import Rule
 
@@ -37,12 +39,86 @@ from py21cmfast import (
     run_lightcone,
 )
 from py21cmfast.lightconers import RectilinearLightconer
-from py21cmfast.wrapper.outputs import BrightnessTemp, IonizedBox, PerturbedField, TsBox
+from py21cmfast.wrapper.outputs import (
+    BrightnessTemp,
+    IonizedBox,
+    OutputStruct,
+    PerturbedField,
+    TsBox,
+)
 
-if __package__:
-    from .integration_units import field_unit, power_spectrum, write_quantity
-else:
-    from integration_units import field_unit, power_spectrum, write_quantity
+
+def assert_reference_fields(group: h5py.Group, expected: Iterable[str]) -> None:
+    """Require the complete dataset inventory before reading physical references.
+
+    Parameters
+    ----------
+    group
+        Reference group for one simulation configuration.
+    expected
+        Dataset names required by that configuration, independently of stored data.
+    """
+    actual, required = set(group), set(expected)
+    location = f"{group.file.filename}:{group.name}"
+    assert not (missing := required - actual), (
+        f"Missing reference fields in {location}: {sorted(missing)}"
+    )
+    assert not (extra := actual - required), (
+        f"Unexpected reference fields in {location}: {sorted(extra)}"
+    )
+    for name in sorted(required):
+        assert isinstance(group[name], h5py.Dataset), (
+            f"Reference {location}/{name} must be a dataset."
+        )
+
+
+def field_unit(boxes: Iterable[OutputStruct], name: str) -> un.UnitBase:
+    """Read a field's declared unit without loading its numerical array."""
+    for box in boxes:
+        if name in box.arrays:
+            unit = box.arrays[name].unit
+            if unit is None:
+                raise ValueError(f"The field {name!r} has no unit metadata.")
+            return unit
+    raise KeyError(f"No output struct contains the field {name!r}.")
+
+
+def write_quantity(group: h5py.Group, name: str, quantity: un.Quantity) -> h5py.Dataset:
+    """Store numerical samples with an explicit, parseable unit attribute."""
+    if not isinstance(quantity, un.Quantity):
+        raise TypeError(f"The reference {name!r} must be an Astropy Quantity.")
+    dataset = group.create_dataset(name, data=quantity.value)
+    dataset.attrs["unit"] = quantity.unit.to_string()
+    return dataset
+
+
+def read_quantity(dataset: h5py.Dataset) -> un.Quantity:
+    """Load a typed reference, rejecting absent or invalid unit metadata."""
+    if "unit" not in dataset.attrs:
+        raise ValueError(f"Reference {dataset.name!r} has no unit metadata.")
+    stored_unit = dataset.attrs["unit"]
+    if not isinstance(stored_unit, str | bytes):
+        raise TypeError(f"Reference {dataset.name!r} has invalid unit metadata.")
+    if isinstance(stored_unit, bytes):
+        stored_unit = stored_unit.decode("utf-8")
+    return un.Quantity(dataset[...], un.Unit(stored_unit), dtype=None, copy=False)
+
+
+def power_spectrum(
+    field: un.Quantity, boxlength: un.Quantity
+) -> tuple[un.Quantity, un.Quantity]:
+    """Attach field-squared times volume units to the existing power estimator."""
+    result = get_power(
+        field.value,
+        boxlength=boxlength.to_value(un.Mpc),
+        bins_upto_boxlen=True,
+        vol_normalised_power=True,
+    )
+    return (
+        un.Quantity(result.power, field.unit**2 * un.Mpc**field.ndim, copy=False),
+        un.Quantity(result.bin_avg, un.Mpc**-1, copy=False),
+    )
+
 
 cns = Console()
 logger = logging.getLogger("py21cmfast")

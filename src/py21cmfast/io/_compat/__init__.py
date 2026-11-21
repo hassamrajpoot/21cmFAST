@@ -83,6 +83,58 @@ def needs_upgrade(version: str | Version) -> bool:
     return bool(releases_since(version))
 
 
+def restore_array_metadata(
+    source: _compat_framework.ArrayOnDisk,
+    version: str | Version,
+    *,
+    unit: str,
+    description: str,
+) -> tuple[str, str]:
+    """Recover metadata omitted by the v4 cache format.
+
+    Parameters
+    ----------
+    source
+        Dataset pointer, including any explicitly stored metadata.
+    version
+        Version that wrote the cache file.
+    unit, description
+        Metadata declared for this field after the file's format conversions.
+
+    Returns
+    -------
+    tuple of str
+        Stored metadata, with missing v4 attributes filled from the declaration.
+
+    Notes
+    -----
+    This additive extension of the v4 dataset format does not change its numbers.
+    v4 files without metadata can be migrated while v4 is supported; the existing
+    support policy rejects them in v6. Files written by v5 or later must provide
+    their own metadata. Unversioned standalone pickles are not cache files and
+    cannot use a field declaration to recover an unknown physical unit.
+    """
+    version = parse_version(version)
+    if _compat_framework.support_status(version) == "unsupported":
+        raise _compat_framework.UnsupportedVersionError(
+            f"Files written by 21cmFAST v{version} are not supported."
+        )
+    if (source.unit is None or source.description is None) and version.major != 4:
+        raise ValueError(
+            f"Array {source.backend.dataset} is missing unit or description "
+            f"metadata in a v{version} cache file."
+        )
+    unit = source.unit if source.unit is not None else unit
+    description = source.description if source.description is not None else description
+    if isinstance(unit, bytes):
+        unit = unit.decode("utf-8")
+    if isinstance(description, bytes):
+        description = description.decode("utf-8")
+    if not isinstance(unit, str) or not isinstance(description, str):
+        raise TypeError(f"Invalid array metadata for {source.backend.dataset}.")
+    return unit, description
+
+
 def is_legacy(version: str | Version) -> bool:
     """Whether files of a given version must be converted to the current format.
 

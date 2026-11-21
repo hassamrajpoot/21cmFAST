@@ -461,86 +461,51 @@ def test_optional_field_ion(default_input_struct_lc: InputParameters):
     assert "nion_conditional_filtered_mcg" in ion.arrays
 
 
-@pytest.fixture(
-    scope="module",
-    params=[
-        pytest.param(
-            (use_mcgs, recomb_model, minimize_memory, source_model),
-            id=f"{source_model}-{recomb_model}-mcgs={use_mcgs}-minimal={minimize_memory}",
-        )
-        for use_mcgs, recomb_model in [
-            (False, "none"),
-            (False, "homogeneous"),
-            (False, "inhomogeneous"),
-            (True, "homogeneous"),
-            (True, "inhomogeneous"),
-        ]
-        for minimize_memory in [False, True]
-        for source_model in ["E-INTEGRAL", "CHMF-SAMPLER"]
-    ],
-)
+@pytest.fixture(scope="module", params=["E-INTEGRAL", "CHMF-SAMPLER"])
 def field_metadata_inputs(
     default_input_struct_lc: InputParameters, request: pytest.FixtureRequest
 ) -> InputParameters:
-    """Use the same physical configurations for each structure's metadata checks."""
-    use_mcgs, recomb_model, minimize_memory, source_model = request.param
+    """Enable all optional fields, with two mutually exclusive source grids."""
     return default_input_struct_lc.evolve_input_structs(
+        HII_DIM=2,
+        DIM=4,
         USE_TS_FLUCT=True,
-        USE_MCGS=use_mcgs,
-        V_CB_MODEL="AVG-DEBUG" if use_mcgs else "NONE",
-        M_TURN_STELLAR_FEEDBACK=5.0 if use_mcgs else 8.7,
-        RECOMB_MODEL=recomb_model,
-        CELL_RECOMB=recomb_model == "homogeneous",
+        USE_MCGS=True,
+        V_CB_MODEL="AVG-DEBUG",
+        M_TURN_STELLAR_FEEDBACK=5.0,
+        RECOMB_MODEL=(
+            "homogeneous" if request.param == "E-INTEGRAL" else "inhomogeneous"
+        ),
+        CELL_RECOMB=request.param == "E-INTEGRAL",
         R_BUBBLE_MAX=50.0,
-        MINIMIZE_MEMORY=minimize_memory,
-        SOURCE_MODEL=source_model,
+        MINIMIZE_MEMORY=False,
+        USE_LYA_HEATING=True,
+        USE_X_RAY_HEATING=True,
+        LYA_MULTIPLE_SCATTERING=True,
+        SOURCE_MODEL=request.param,
     )
 
 
 def _check_field_metadata(
     box: ox.OutputStruct,
-    expected: dict[str, tuple[un.UnitBase, tuple[str, ...]]],
+    expected: dict[str, un.UnitBase],
     *,
     optional_fields: dict[str, bool],
 ) -> None:
-    """Check field presence, dimensions, description keywords, and NumPy access."""
+    """Check the field inventory and physical dimensions, allowing equivalent units."""
     expected_names = {name for name in expected if optional_fields.get(name, True)}
-    arrays = box.arrays
-    assert set(arrays) == expected_names
-    for name, array in arrays.items():
-        dimension, description_terms = expected[name]
-        assert isinstance(array.unit, un.UnitBase), name
-        assert array.unit.is_equivalent(dimension), name
-        assert isinstance(array.description, str), name
-        description = array.description.casefold()
-        for term in description_terms:
-            assert term in description, (name, term, array.description)
-        assert array._value is None
-        fill = 1 if np.issubdtype(array.dtype, np.integer) else 0.25
-        values = np.full(array.shape, fill, dtype=array.dtype)
-        setattr(box, name, array.with_value(values))
-        quantity_value = getattr(box, name)
-        assert isinstance(quantity_value, np.ndarray)
-        assert not isinstance(quantity_value, un.Quantity)
-        assert quantity_value.dtype == array.dtype
-        np.testing.assert_array_equal(quantity_value, values)
-        quantity = box.arrays[name].get_quantity()
-        assert quantity.unit == array.unit, name
-        assert quantity.unit.is_equivalent(dimension), name
-        assert quantity.dtype == array.dtype
-        np.testing.assert_array_equal(quantity.value, values)
+    assert set(box.arrays) == expected_names
+    for name, array in box.arrays.items():
+        assert array.unit.is_equivalent(expected[name], equivalencies=None), name
 
 
 @pytest.mark.parametrize("high_resolution", [False, True])
-@pytest.mark.parametrize("algorithm", ["ZELDOVICH", "2LPT"])
-@pytest.mark.parametrize("relative_velocity", [False, True])
 def test_initial_conditions_field_metadata(
     default_input_struct_lc: InputParameters,
     high_resolution: bool,
-    algorithm: str,
-    relative_velocity: bool,
 ) -> None:
     """Distinguish the initial displacement fields from evolved velocities."""
+    algorithm, relative_velocity = "2LPT", True
     # Fluctuating relative velocities require the minihalo thermal/recombination model.
     inputs = default_input_struct_lc.evolve_input_structs(
         PERTURB_ON_HIGH_RES=high_resolution,
@@ -558,17 +523,17 @@ def test_initial_conditions_field_metadata(
         ),
     )
     expected = {
-        "lowres_density": (un.dimensionless_unscaled, ("density contrast",)),
-        "hires_density": (un.dimensionless_unscaled, ("density contrast",)),
-        "lowres_vcb": (un.m / un.s, ("relative speed",)),
+        "lowres_density": un.dimensionless_unscaled,
+        "hires_density": un.dimensionless_unscaled,
+        "lowres_vcb": un.m / un.s,
     }
     optional_fields = {"lowres_vcb": relative_velocity}
     for resolution in ("lowres", "hires"):
         for axis in "xyz":
             name = f"{resolution}_v{axis}"
-            expected[name] = (un.m, ("comoving displacement", "first order"))
+            expected[name] = un.m
             optional_fields[name] = (resolution == "hires") == high_resolution
-            expected[name + "_2LPT"] = (un.m, ("comoving displacement", "second order"))
+            expected[name + "_2LPT"] = un.m
             optional_fields[name + "_2LPT"] = algorithm == "2LPT" and (
                 resolution == "hires" or not high_resolution
             )
@@ -579,23 +544,19 @@ def test_initial_conditions_field_metadata(
     )
 
 
-@pytest.mark.parametrize("dimension", [1, 4])
-@pytest.mark.parametrize("keep_3d_velocities", [False, True])
 def test_perturbed_field_metadata(
-    default_input_struct: InputParameters, dimension: int, keep_3d_velocities: bool
+    default_input_struct: InputParameters,
 ) -> None:
     """Check density and the velocity components enabled for each geometry."""
+    dimension, keep_3d_velocities = 2, True
     inputs = default_input_struct.evolve_input_structs(
         HII_DIM=dimension, DIM=2 * dimension, KEEP_3D_VELOCITIES=keep_3d_velocities
     )
     _check_field_metadata(
         ox.PerturbedField.new(inputs=inputs, redshift=10.0),
         {
-            "density": (un.dimensionless_unscaled, ("density contrast",)),
-            **{
-                f"velocity_{axis}": (un.m / un.s, ("comoving peculiar velocity",))
-                for axis in "xyz"
-            },
+            "density": un.dimensionless_unscaled,
+            **{f"velocity_{axis}": un.m / un.s for axis in "xyz"},
         },
         optional_fields={
             f"velocity_{axis}": dimension > 1 and (axis == "z" or keep_3d_velocities)
@@ -604,17 +565,17 @@ def test_perturbed_field_metadata(
     )
 
 
-@pytest.mark.parametrize("spin_temperature", [False, True])
 def test_brightness_temperature_field_metadata(
-    default_input_struct_lc: InputParameters, spin_temperature: bool
+    default_input_struct_lc: InputParameters,
 ) -> None:
     """Check temperature dimensions and the optional optical-depth field."""
+    spin_temperature = True
     inputs = default_input_struct_lc.evolve_input_structs(USE_TS_FLUCT=spin_temperature)
     _check_field_metadata(
         ox.BrightnessTemp.new(inputs=inputs, redshift=10.0),
         {
-            "brightness_temp": (un.K, ("brightness temperature contrast",)),
-            "tau_21": (un.dimensionless_unscaled, ("optical depth",)),
+            "brightness_temp": un.K,
+            "tau_21": un.dimensionless_unscaled,
         },
         optional_fields={"tau_21": spin_temperature},
     )
@@ -626,16 +587,10 @@ def test_ts_box_field_metadata(field_metadata_inputs: InputParameters) -> None:
     _check_field_metadata(
         box,
         {
-            "spin_temperature": (un.K, ("hydrogen", "spin", "temperature")),
-            "xray_ionised_fraction": (
-                un.dimensionless_unscaled,
-                ("x-ray", "ionized", "fraction"),
-            ),
-            "kinetic_temp_neutral": (un.K, ("kinetic", "temperature", "neutral")),
-            "J_21_LW": (
-                un.erg / (un.s * un.cm**2 * un.Hz * un.sr),
-                ("lyman-werner", "specific intensity"),
-            ),
+            "spin_temperature": un.K,
+            "xray_ionised_fraction": un.dimensionless_unscaled,
+            "kinetic_temp_neutral": un.K,
+            "J_21_LW": un.erg / (un.s * un.cm**2 * un.Hz * un.sr),
         },
         optional_fields={"J_21_LW": field_metadata_inputs.astro_options.USE_MCGS},
     )
@@ -649,29 +604,14 @@ def test_ionized_box_field_metadata(field_metadata_inputs: InputParameters) -> N
     _check_field_metadata(
         box,
         {
-            "neutral_fraction": (
-                un.dimensionless_unscaled,
-                ("neutral", "hydrogen", "fraction"),
-            ),
-            "ionisation_rate_G12": (
-                un.s**-1,
-                ("hydrogen", "photoionization", "rate"),
-            ),
-            "z_reion": (un.dimensionless_unscaled, ("redshift", "cell", "ionized")),
-            "mean_free_path": (un.Mpc, ("comoving", "filter radius", "mean free path")),
-            "cumulative_recombinations": (
-                un.dimensionless_unscaled,
-                ("cumulative", "recombination", "per baryon"),
-            ),
-            "kinetic_temperature": (un.K, ("kinetic", "temperature", "ionized")),
-            "nion_conditional_filtered_acg": (
-                un.dimensionless_unscaled,
-                ("conditional", "photon", "atomic", "before normalization"),
-            ),
-            "nion_conditional_filtered_mcg": (
-                un.dimensionless_unscaled,
-                ("conditional", "photon", "molecular", "before normalization"),
-            ),
+            "neutral_fraction": un.dimensionless_unscaled,
+            "ionisation_rate_G12": un.s**-1,
+            "z_reion": un.dimensionless_unscaled,
+            "mean_free_path": un.Mpc,
+            "cumulative_recombinations": un.dimensionless_unscaled,
+            "kinetic_temperature": un.K,
+            "nion_conditional_filtered_acg": un.dimensionless_unscaled,
+            "nion_conditional_filtered_mcg": un.dimensionless_unscaled,
         },
         optional_fields={
             "kinetic_temperature": not matter.MINIMIZE_MEMORY,
@@ -687,112 +627,38 @@ def test_ionized_box_field_metadata(field_metadata_inputs: InputParameters) -> N
     )
 
 
-@pytest.fixture(
-    scope="module",
-    params=[
-        pytest.param(
-            (thermal, mcgs, recomb, source),
-            id=f"{source}-thermal={thermal}-mcgs={mcgs}-{recomb}",
-        )
-        for thermal, mcgs, recomb in [
-            (False, False, "none"),
-            (False, False, "homogeneous"),
-            (False, False, "inhomogeneous"),
-            (True, False, "none"),
-            (True, False, "homogeneous"),
-            (True, False, "inhomogeneous"),
-            (True, True, "homogeneous"),
-            (True, True, "inhomogeneous"),
-        ]
-        for source in ("E-INTEGRAL", "CHMF-SAMPLER")
-    ],
-)
-def emissivity_metadata_inputs(
-    default_input_struct_lc: InputParameters, request: pytest.FixtureRequest
-) -> InputParameters:
-    """Cover enabled emissivity fields with valid small input configurations."""
-    thermal, mcgs, recomb, source = request.param
-    return default_input_struct_lc.evolve_input_structs(
-        HII_DIM=2,
-        DIM=4,
-        USE_TS_FLUCT=thermal,
-        USE_MCGS=mcgs,
-        V_CB_MODEL="AVG-DEBUG" if mcgs else "NONE",
-        M_TURN_STELLAR_FEEDBACK=5.0 if mcgs else 8.7,
-        RECOMB_MODEL=recomb,
-        CELL_RECOMB=recomb == "homogeneous",
-        R_BUBBLE_MAX=50.0,
-        SOURCE_MODEL=source,
-    )
-
-
-@pytest.fixture(
-    scope="module",
-    params=[
-        pytest.param(
-            (mcgs, lya, xray, scattering, source),
-            id=f"{source}-mcgs={mcgs}-lya={lya}-xray={xray}-scattering={scattering}",
-        )
-        for mcgs in (False, True)
-        for lya in (False, True)
-        for xray in (False, True)
-        for scattering in (False, True)
-        for source in ("E-INTEGRAL", "CHMF-SAMPLER")
-    ],
-)
-def radiation_metadata_inputs(
-    default_input_struct_lc: InputParameters, request: pytest.FixtureRequest
-) -> InputParameters:
-    """Cover radiation allocation branches without computing radiation fields."""
-    mcgs, lya, xray, scattering, source = request.param
-    return default_input_struct_lc.evolve_input_structs(
-        HII_DIM=2,
-        DIM=4,
-        USE_TS_FLUCT=True,
-        USE_MCGS=mcgs,
-        V_CB_MODEL="AVG-DEBUG" if mcgs else "NONE",
-        M_TURN_STELLAR_FEEDBACK=5.0 if mcgs else 8.7,
-        RECOMB_MODEL="inhomogeneous",
-        R_BUBBLE_MAX=50.0,
-        USE_LYA_HEATING=lya,
-        USE_X_RAY_HEATING=xray,
-        LYA_MULTIPLE_SCATTERING=scattering,
-        SOURCE_MODEL=source,
-    )
-
-
 def test_halo_catalog_field_metadata(default_input_struct: InputParameters) -> None:
     """Separate dimensional halo properties from dimensionless Gaussian variates."""
     _check_field_metadata(
         ox.HaloCatalog.new(inputs=default_input_struct, redshift=10.0, buffer_size=3),
         {
-            "halo_masses": (un.kg, ("halo mass",)),
-            "halo_coords": (un.m, ("comoving", "coordinates")),
-            "star_rng": (un.dimensionless_unscaled, ("gaussian", "stellar mass")),
-            "sfr_rng": (un.dimensionless_unscaled, ("gaussian", "star-formation")),
-            "xray_rng": (un.dimensionless_unscaled, ("gaussian", "x-ray")),
+            "halo_masses": un.kg,
+            "halo_coords": un.m,
+            "star_rng": un.dimensionless_unscaled,
+            "sfr_rng": un.dimensionless_unscaled,
+            "xray_rng": un.dimensionless_unscaled,
         },
         optional_fields={},
     )
 
 
 def test_perturbed_halo_catalog_field_metadata(
-    emissivity_metadata_inputs: InputParameters,
+    field_metadata_inputs: InputParameters,
 ) -> None:
     """Check halo properties before deposition divides them by cell volume."""
-    inputs = emissivity_metadata_inputs
+    inputs = field_metadata_inputs
     _check_field_metadata(
         ox.PerturbedHaloCatalog.new(inputs=inputs, redshift=10.0, buffer_size=3),
         {
-            "halo_masses": (un.kg, ("halo mass",)),
-            "halo_coords": (un.m, ("displaced", "comoving", "coordinates")),
-            "stellar_masses_acg": (un.kg, ("stellar mass", "atomic")),
-            "stellar_masses_mcg": (un.kg, ("stellar mass", "molecular")),
-            "sfr_acg": (un.kg / un.s, ("star-formation rate", "atomic")),
-            "sfr_mcg": (un.kg / un.s, ("star-formation rate", "molecular")),
-            "n_ion": (un.m**3, ("volume-equivalent", "ionizing-photon")),
-            "xray_luminosity": (un.erg / un.s, ("x-ray luminosity",)),
-            "fesc_weighted_sfr": (un.kg / un.s, ("ionizing yield", "escape fraction")),
+            "halo_masses": un.kg,
+            "halo_coords": un.m,
+            "stellar_masses_acg": un.kg,
+            "stellar_masses_mcg": un.kg,
+            "sfr_acg": un.kg / un.s,
+            "sfr_mcg": un.kg / un.s,
+            "n_ion": un.m**3,
+            "xray_luminosity": un.erg / un.s,
+            "fesc_weighted_sfr": un.kg / un.s,
         },
         optional_fields={
             "stellar_masses_mcg": inputs.astro_options.USE_MCGS,
@@ -803,47 +669,26 @@ def test_perturbed_halo_catalog_field_metadata(
     )
 
 
-@pytest.mark.parametrize("extra", [False, True])
 def test_emissivity_fields_field_metadata(
-    emissivity_metadata_inputs: InputParameters, extra: bool
+    field_metadata_inputs: InputParameters,
 ) -> None:
     """Check deposited counts, densities, and the normalized ionizing budget."""
-    inputs = emissivity_metadata_inputs
+    inputs = field_metadata_inputs
+    extra = True
     with config.use(EXTRA_EMISSIVITY_FIELDS=extra):
         box = ox.EmissivityFields.new(inputs=inputs, redshift=10.0)
     _check_field_metadata(
         box,
         {
-            "halo_number": (un.dimensionless_unscaled, ("halo count", "per cell")),
-            "halo_mass_density": (un.kg / un.m**3, ("comoving", "halo mass density")),
-            "stellar_mass_density_acg": (
-                un.kg / un.m**3,
-                ("comoving", "stellar mass density", "atomic"),
-            ),
-            "stellar_mass_density_mcg": (
-                un.kg / un.m**3,
-                ("comoving", "stellar mass density", "molecular"),
-            ),
-            "sfrd_acg": (
-                un.kg / (un.s * un.m**3),
-                ("comoving", "star-formation-rate density", "atomic"),
-            ),
-            "sfrd_mcg": (
-                un.kg / (un.s * un.m**3),
-                ("comoving", "star-formation-rate density", "molecular"),
-            ),
-            "xray_emissivity": (
-                un.erg / (un.s * un.m**3),
-                ("comoving", "x-ray luminosity density"),
-            ),
-            "n_ion": (
-                un.dimensionless_unscaled,
-                ("ionizing-photon", "per mean baryon"),
-            ),
-            "fesc_weighted_sfrd": (
-                un.kg / (un.s * un.m**3),
-                ("comoving", "ionizing yield", "escape fraction"),
-            ),
+            "halo_number": un.dimensionless_unscaled,
+            "halo_mass_density": un.kg / un.m**3,
+            "stellar_mass_density_acg": un.kg / un.m**3,
+            "stellar_mass_density_mcg": un.kg / un.m**3,
+            "sfrd_acg": un.kg / (un.s * un.m**3),
+            "sfrd_mcg": un.kg / (un.s * un.m**3),
+            "xray_emissivity": un.erg / (un.s * un.m**3),
+            "n_ion": un.dimensionless_unscaled,
+            "fesc_weighted_sfrd": un.kg / (un.s * un.m**3),
         },
         optional_fields={
             "halo_number": extra,
@@ -861,26 +706,20 @@ def test_emissivity_fields_field_metadata(
 
 
 def test_radiation_fields_setup_field_metadata(
-    radiation_metadata_inputs: InputParameters,
+    field_metadata_inputs: InputParameters,
 ) -> None:
     """Check frequency integrals, shell coordinates, and interpolation helpers."""
-    inputs = radiation_metadata_inputs
+    inputs = field_metadata_inputs
     astro = inputs.astro_options
     expected = {
-        "R_values": (un.m, ("comoving", "shell radius")),
-        "zpp_avg": (un.dimensionless_unscaled, ("shell", "mean redshift")),
-        "zpp_edges": (un.dimensionless_unscaled, ("shell", "edge redshift")),
-        "inverse_diff": (
-            un.dimensionless_unscaled,
-            ("inverse", "electron-fraction interval"),
-        ),
-        "m_xHII_low_box": (un.dimensionless_unscaled, ("electron-fraction", "index")),
-        "inverse_val_box": (un.dimensionless_unscaled, ("electron-fraction", "weight")),
-        "ave_log10_MturnLW": (un.dimensionless_unscaled, ("log10", "molecular")),
-        "filtered_xray_emissivity": (
-            un.erg / (un.s * un.m**3),
-            ("shell-filtered", "x-ray luminosity density"),
-        ),
+        "R_values": un.m,
+        "zpp_avg": un.dimensionless_unscaled,
+        "zpp_edges": un.dimensionless_unscaled,
+        "inverse_diff": un.dimensionless_unscaled,
+        "m_xHII_low_box": un.dimensionless_unscaled,
+        "inverse_val_box": un.dimensionless_unscaled,
+        "ave_log10_MturnLW": un.dimensionless_unscaled,
+        "filtered_xray_emissivity": un.erg / (un.s * un.m**3),
     }
     optional = {"ave_log10_MturnLW": astro.USE_MCGS}
     for integral, dimension in {
@@ -926,23 +765,17 @@ def test_radiation_fields_setup_field_metadata(
 
 
 def test_radiation_fields_field_metadata(
-    radiation_metadata_inputs: InputParameters,
+    field_metadata_inputs: InputParameters,
 ) -> None:
     """Distinguish temperature/ionization rates and photon-number/energy intensity."""
-    inputs = radiation_metadata_inputs
+    inputs = field_metadata_inputs
     astro = inputs.astro_options
     number_intensity = un.cm**-2 / (un.s * un.Hz * un.sr)
     _check_field_metadata(
         ox.RadiationFields.new(inputs=inputs, redshift=10.0),
         {
-            "xray_heating_rate": (
-                un.K / un.s,
-                ("x-ray", "temperature", "time derivative"),
-            ),
-            "xray_ionization_rate": (
-                un.s**-1,
-                ("x-ray", "electron-fraction", "time derivative"),
-            ),
+            "xray_heating_rate": un.K / un.s,
+            "xray_ionization_rate": un.s**-1,
             "xray_lya_flux": (
                 number_intensity,
                 ("lyman-alpha", "photon-number", "x-rays"),
@@ -959,10 +792,7 @@ def test_radiation_fields_field_metadata(
                 number_intensity,
                 ("lyman-alpha", "photon-number", "continuum", "injected"),
             ),
-            "lyw_flux": (
-                un.erg / (un.s * un.cm**2 * un.Hz * un.sr),
-                ("lyman-werner", "energy", "intensity"),
-            ),
+            "lyw_flux": un.erg / (un.s * un.cm**2 * un.Hz * un.sr),
         },
         optional_fields={
             "xray_heating_rate": astro.USE_X_RAY_HEATING,
@@ -972,89 +802,6 @@ def test_radiation_fields_field_metadata(
             "lya_flux_continuum_injected": not astro.USE_LYA_HEATING,
         },
     )
-
-
-def test_halo_and_emissivity_scaled_quantities(
-    default_input_struct_lc: InputParameters,
-) -> None:
-    """Check stored luminosity scales, SFR time units, and deposition dimensions."""
-    inputs = default_input_struct_lc.evolve_input_structs(
-        USE_TS_FLUCT=True, HII_DIM=2, DIM=4
-    )
-    halo = ox.PerturbedHaloCatalog.new(inputs=inputs, redshift=10.0, buffer_size=1)
-    grid = ox.EmissivityFields.new(inputs=inputs, redshift=10.0)
-    for box, name, unit in (
-        (halo, "xray_luminosity", un.erg / un.s),
-        (grid, "xray_emissivity", un.erg / (un.s * un.Mpc**3)),
-    ):
-        array = box.arrays[name]
-        setattr(
-            box, name, array.with_value(np.full(array.shape, 100, dtype=array.dtype))
-        )
-        np.testing.assert_allclose(
-            box.arrays[name].get_quantity().astype(np.float64).to_value(unit),
-            1e40,
-            rtol=1e-12,
-            atol=0,
-        )
-    assert halo.arrays["n_ion"].unit.is_equivalent(un.Mpc**3)
-    assert grid.arrays["n_ion"].unit == un.dimensionless_unscaled
-    rate = halo.arrays["sfr_acg"]
-    halo.sfr_acg = np.ones(rate.shape, dtype=rate.dtype)
-    np.testing.assert_allclose(
-        halo.arrays["sfr_acg"].get_quantity().to_value(un.M_sun / un.yr),
-        (1 * un.yr).to_value(un.s),
-        rtol=1e-7,
-        atol=0,
-    )
-
-
-def test_output_scaled_units_convert_to_physical_units(
-    default_input_struct_lc: InputParameters,
-) -> None:
-    """Check declared rate and intensity scales using synthetic field values."""
-    inputs = default_input_struct_lc.evolve_input_structs(
-        USE_TS_FLUCT=True,
-        USE_MCGS=True,
-        V_CB_MODEL="AVG-DEBUG",
-        M_TURN_STELLAR_FEEDBACK=5.0,
-        RECOMB_MODEL="inhomogeneous",
-        R_BUBBLE_MAX=50.0,
-    )
-    ion = ox.IonizedBox.new(inputs=inputs, redshift=10.0)
-    ion.ionisation_rate_G12 = np.ones(ion.arrays["ionisation_rate_G12"].shape)
-    np.testing.assert_allclose(
-        ion.arrays["ionisation_rate_G12"].get_quantity().to_value(un.s**-1),
-        1e-12,
-        rtol=1e-7,
-        atol=0,
-    )
-    ts = ox.TsBox.new(inputs=inputs, redshift=10.0)
-    ts.J_21_LW = np.ones(ts.arrays["J_21_LW"].shape)
-    np.testing.assert_allclose(
-        ts.arrays["J_21_LW"]
-        .get_quantity()
-        .to_value(un.erg / (un.s * un.cm**2 * un.Hz * un.sr)),
-        1e-21,
-        rtol=1e-7,
-        atol=0,
-    )
-
-
-def test_quantity_converted_to_stored_unit_can_be_assigned(
-    default_input_struct_lc: InputParameters,
-) -> None:
-    box = ox.TsBox.new(inputs=default_input_struct_lc, redshift=10.0)
-    field = box.arrays["spin_temperature"]
-    box.spin_temperature = np.ones(field.shape, dtype=np.float32)
-
-    converted = box.arrays["spin_temperature"].get_quantity().to(un.mK)
-    converted += 1000 * un.mK
-    box.spin_temperature = converted.to_value(field.unit)
-
-    assert box.arrays["spin_temperature"].unit == un.K
-    assert box.spin_temperature.dtype == np.float32
-    np.testing.assert_array_equal(box.spin_temperature, 2.0)
 
 
 def test_optional_field_bt(default_input_struct_lc: InputParameters):

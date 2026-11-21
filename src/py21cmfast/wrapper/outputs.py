@@ -741,7 +741,10 @@ class InitialConditions(OutputStruct):
                 shape,
                 dtype=np.float32,
                 unit=_RELATIVE_VELOCITY_UNIT,
-                description="Baryon-dark-matter relative speed.",
+                description=(
+                    "Amplitude of the relative velocity between baryon and cold dark "
+                    "matter at kinematic decoupling"
+                ),
             )
 
         return cls(inputs=inputs, **out, **kw)
@@ -1032,7 +1035,7 @@ class HaloCatalog(OutputStructZ):
                 (buffer_size,),
                 dtype=np.float32,
                 unit=un.M_sun,
-                description="Halo mass.",
+                description="An array containing the halo masses in the catalog",
             ),
             star_rng=Array(
                 (buffer_size,),
@@ -1056,7 +1059,11 @@ class HaloCatalog(OutputStructZ):
                 (buffer_size, 3),
                 dtype=np.float32,
                 unit=un.Mpc,
-                description="Comoving halo coordinates.",
+                description=(
+                    "An (N,3) matrix containing the comoving coordinates of the halos "
+                    "in the catalog. Different rows correspond to different halos, "
+                    "while different columns correspond to different coordinates in space."
+                ),
             ),
             redshift=redshift,
             buffer_size=buffer_size,
@@ -1203,13 +1210,17 @@ class PerturbedHaloCatalog(OutputStructZ):
                 (buffer_size, 3),
                 dtype=np.float32,
                 unit=un.Mpc,
-                description="Displaced comoving halo coordinates.",
+                description=(
+                    "An (N,3) matrix containing the comoving coordinates of the perturbed halos "
+                    "in the catalog. Different rows correspond to different halos, "
+                    "while different columns correspond to different coordinates in space."
+                ),
             ),
             "halo_masses": Array(
                 (buffer_size,),
                 dtype=np.float32,
                 unit=un.M_sun,
-                description="Halo mass.",
+                description="An array containing the halo masses in the catalog",
             ),
             "stellar_masses_acg": Array(
                 (buffer_size,),
@@ -1391,7 +1402,7 @@ class EmissivityFields(OutputStructZ):
                 shape,
                 dtype=np.float32,
                 unit=un.dimensionless_unscaled,
-                description="Escaped ionizing-photon budget per mean baryon in the comoving cell.",
+                description="number of ionizing photons per baryon that escaped to the IGM.",
             )
         }
 
@@ -1412,7 +1423,7 @@ class EmissivityFields(OutputStructZ):
                 shape,
                 dtype=np.float32,
                 unit=_XRAY_EMISSIVITY_UNIT,
-                description="Comoving X-ray luminosity density.",
+                description="Comoving X-ray emissivity",
             )
             out["sfrd_acg"] = Array(
                 shape,
@@ -1433,7 +1444,7 @@ class EmissivityFields(OutputStructZ):
                 shape,
                 dtype=np.float32,
                 unit=un.dimensionless_unscaled,
-                description="Deposited halo count per cell.",
+                description="number of halos per cell",
             )
             out["halo_mass_density"] = Array(
                 shape,
@@ -2571,16 +2582,11 @@ class IonizedBox(OutputStructZ):
                     ),
                 )
 
-        if inputs.astro_options.RECOMB_MODEL == "inhomogeneous":
+        if inputs.astro_options.RECOMB_MODEL in ("homogeneous", "inhomogeneous"):
             out["cumulative_recombinations"] = Array(
-                shape,
-                dtype=np.float32,
-                unit=un.dimensionless_unscaled,
-                description="Cumulative recombination count per baryon.",
-            )
-        elif inputs.astro_options.RECOMB_MODEL == "homogeneous":
-            out["cumulative_recombinations"] = Array(
-                (1, 1, 1),
+                (1, 1, 1)
+                if inputs.astro_options.RECOMB_MODEL == "homogeneous"
+                else shape,
                 dtype=np.float32,
                 unit=un.dimensionless_unscaled,
                 description="Cumulative recombination count per baryon.",

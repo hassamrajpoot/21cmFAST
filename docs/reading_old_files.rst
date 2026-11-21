@@ -57,6 +57,24 @@ Files written before v4.0 have never been supported, since they don't record the
 version of ``21cmFAST`` that wrote them. Their arrays can still be read directly with
 ``h5py``.
 
+Array metadata
+--------------
+Cache datasets now store ``unit`` and ``description`` attributes. Missing
+attributes in supported v4 files are recovered from the field declarations,
+after any format conversions. Migrating such a file writes the recovered
+metadata explicitly. v4 files follow the same support policy as other v4
+outputs: supported in v4, deprecated in v5, and rejected in v6. Files written by
+v5 or later must contain their array metadata.
+
+Cached values in equivalent units are converted to the native field unit before
+use. The ordinary path, with units matching the declarations, remains lazy.
+Incompatible dimensions raise an error.
+
+Standalone legacy ``Array`` pickles do not identify a field or record a cache
+format version. Their unknown units cannot be inferred safely: raw access is
+retained, but quantity conversion raises an error until the metadata is supplied.
+This exception does not produce unitless fields when reading versioned caches.
+
 Migrating a cache
 -----------------
 The cache (see :class:`~py21cmfast.io.caching.OutputCache`) finds the boxes of a

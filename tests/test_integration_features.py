@@ -22,23 +22,29 @@ a reasonable test: they should be of reduced data such as power spectra or globa
 measurements, and they should be generated with small simulations.
 """
 
+import gc
 import logging
+import sys
+import weakref
+from pathlib import Path
+from types import SimpleNamespace
 
 import h5py
 import matplotlib as mpl
 import numpy as np
 import pytest
 from astropy import units as un
+from astropy.tests.helper import assert_quantity_allclose
 
 from py21cmfast import Coeval, LightCone, OutputCache
 from py21cmfast.wrapper.inputs import Table1D
 
 from . import produce_integration_test_data as prd
-from .integration_units import (
-    assert_physical_type,
-    assert_quantity_close,
+from .produce_integration_test_data import (
     assert_reference_fields,
+    power_spectrum,
     read_quantity,
+    write_quantity,
 )
 
 logger = logging.getLogger("py21cmfast")
@@ -60,6 +66,45 @@ options_pt = list(prd.OPTIONS_PT.keys())
 # Archived CI already reports power differences as large as about 21%.
 _POWER_REPORT_RTOL = 1e-4
 _POWER_FAILURE_RTOL = 0.25
+
+
+def assert_physical_type(
+    actual: un.Quantity, reference: un.Quantity, *, name: str = ""
+) -> None:
+    """Reject incompatible dimensions independently of numerical tolerances.
+
+    Parameters
+    ----------
+    actual, reference
+        Typed physical values to compare. Scaled representations of the same
+        dimensions are accepted; global physical equivalencies are not applied.
+    name
+        Field name included in an incompatible-dimensions error.
+    """
+    if not isinstance(actual, un.Quantity) or not isinstance(reference, un.Quantity):
+        raise TypeError("Both actual and reference must be Astropy Quantity objects.")
+    if not actual.unit.is_equivalent(reference.unit, equivalencies=None):
+        raise un.UnitConversionError(
+            f"{name}: incompatible physical dimensions: {actual.unit} and {reference.unit}"
+        )
+
+
+def assert_quantity_close(
+    actual: un.Quantity,
+    reference: un.Quantity,
+    *,
+    rtol: float,
+    atol: un.Quantity | None = None,
+    name: str = "",
+) -> None:
+    """Assert physical agreement without broadcasting or accepting untyped data."""
+    assert_physical_type(actual, reference, name=name)
+    assert actual.shape == reference.shape, f"{name}: reference shape mismatch"
+    assert np.all(np.isfinite(actual)), f"{name}: nonfinite simulation values"
+    assert np.all(np.isfinite(reference)), f"{name}: nonfinite reference values"
+    assert_quantity_allclose(
+        actual, reference, rtol=rtol, atol=atol, equal_nan=False, err_msg=name
+    )
 
 
 def _record_mismatch(request, test, truth, inputs, abs_tol, rel_tol, name):
@@ -437,3 +482,297 @@ def test_perturb_field_data(name):
         assert_quantity_close(
             actual, reference, rtol=1e-5, atol=1e-8 * reference.unit, name=dataset_name
         )
+
+
+@pytest.fixture(params=["coeval", "lightcone"])
+def integration_reference(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> SimpleNamespace:
+    """Supply complete synthetic references through the real comparison entry points."""
+    integration = sys.modules[__name__]
+
+    kind = request.param
+    path = tmp_path / "reference.h5"
+    k = np.array([0.1, 0.2]) / un.Mpc
+    # Explicit fixture inventory: spin-temperature evolution, no minihalos or recombinations.
+    fields = {
+        "density",
+        "velocity_z",
+        "spin_temperature",
+        "xray_ionised_fraction",
+        "kinetic_temp_neutral",
+        "ionisation_rate_G12",
+        "neutral_fraction",
+        "z_reion",
+        "brightness_temp",
+    }
+    if kind == "coeval":
+        fields |= {"lowres_density", "lowres_vx", "lowres_vx_2LPT"}
+    field_units = dict.fromkeys(fields, un.dimensionless_unscaled)
+    field_units.update(
+        {
+            "spin_temperature": un.K,
+            "kinetic_temp_neutral": un.K,
+            "brightness_temp": un.mK,
+            "velocity_z": un.Mpc / un.s,
+            "lowres_vx": un.Mpc,
+            "lowres_vx_2LPT": un.Mpc,
+            "ionisation_rate_G12": un.Unit(1e-12 / un.s),
+        }
+    )
+    powers = {
+        name: np.array([1.0, 2.0]) * field_units[name] ** 2 * un.Mpc**3
+        for name in fields
+    }
+    global_units = {
+        "neutral_fraction": un.dimensionless_unscaled,
+        "brightness_temp": un.mK,
+    }
+    globals_ = {
+        "neutral_fraction": np.array([0.5]),
+        "brightness_temp": np.array([10.0]),
+    }
+    with h5py.File(path, "w") as reference:
+        group = reference.create_group(kind)
+        write_quantity(group, "k", k)
+        for name, power in powers.items():
+            write_quantity(group, f"power_{name}", power)
+        if kind == "lightcone":
+            for name, value in globals_.items():
+                write_quantity(group, f"global_{name}", value * global_units[name])
+    actual_powers = dict(powers)
+    result_type = type("Result", (), {})
+    result = result_type()
+    result.brightness_temp = np.array([1.0])
+    result.lightcones = {"brightness_temp": np.array([1.0])}
+    result.global_quantities = dict(globals_)
+    result.inputs = SimpleNamespace(matter_options=SimpleNamespace(POWER_SPECTRUM="EH"))
+    calls = []
+
+    def produce(
+        *args: object, **kwargs: object
+    ) -> tuple[un.Quantity, dict[str, un.Quantity], object]:
+        calls.append(kind)
+        return k, actual_powers, result
+
+    monkeypatch.setattr(
+        prd, "OPTIONS_TESTRUNS", {"units": [10, {"USE_TS_FLUCT": True}]}
+    )
+    monkeypatch.setattr(prd, "get_filename", lambda *a: path)
+    monkeypatch.setattr(
+        prd, f"produce_{'lc' if kind == 'lightcone' else kind}_power_spectra", produce
+    )
+    monkeypatch.setattr(prd, "lightcone_field_units", lambda lc: global_units)
+    monkeypatch.setattr(integration, "OutputCache", lambda path: None)
+    monkeypatch.setattr(
+        integration, "Coeval" if kind == "coeval" else "LightCone", result_type
+    )
+    comparison_request = SimpleNamespace(node=SimpleNamespace(user_properties=[]))
+    arguments = {
+        "request": comparison_request,
+        "name": "units",
+        "module_direc": tmp_path,
+        "plt": None,
+    }
+    if kind == "lightcone":
+        arguments["benchmark"] = SimpleNamespace(
+            pedantic=lambda fn, **kw: fn(**kw["kwargs"])
+        )
+
+    def compare() -> None:
+        getattr(integration, f"test_power_spectra_{kind}")(**arguments)
+
+    return SimpleNamespace(
+        kind=kind,
+        path=path,
+        powers=actual_powers,
+        result=result,
+        request=comparison_request,
+        calls=calls,
+        compare=compare,
+    )
+
+
+@pytest.mark.parametrize("consistent", [False, True])
+def test_integration_entry_point_checks_physical_power(
+    integration_reference: SimpleNamespace, consistent: bool
+) -> None:
+    case = integration_reference
+    reference_power = case.powers["spin_temperature"]
+    actual_power = reference_power.to(un.mK**2 * un.Mpc**3)
+    if not consistent:
+        actual_power = un.Quantity(reference_power.value, actual_power.unit)
+    case.powers["spin_temperature"] = actual_power
+    if consistent:
+        case.compare()
+        assert not case.request.node.user_properties
+    else:
+        with pytest.raises(AssertionError, match="physical values differ"):
+            case.compare()
+        assert any(
+            key == "reference_mismatch" for key, _ in case.request.node.user_properties
+        )
+
+
+def test_integration_dimensions_fail_independently_of_numerical_comparison(
+    integration_reference: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A diagnostic-only numeric comparison cannot hide incompatible dimensions."""
+    integration = sys.modules[__name__]
+
+    case = integration_reference
+    power = case.powers["spin_temperature"]
+    wrong_unit = un.m**2 * un.Mpc**3
+    # These composite dimensions can both have the label "unknown"; comparing
+    # the physical_type strings would not establish that they are equivalent.
+    assert not power.unit.is_equivalent(wrong_unit)
+    case.powers["spin_temperature"] = un.Quantity(power.value, wrong_unit)
+    monkeypatch.setattr(integration, "assert_quantity_close", lambda *a, **kw: None)
+    with pytest.raises(un.UnitConversionError, match="spin_temperature"):
+        case.compare()
+
+
+@pytest.mark.parametrize(("scale", "fails"), [(1.2, False), (1.3, True)])
+def test_integration_reports_smaller_power_mismatches(
+    integration_reference: SimpleNamespace, scale: float, fails: bool
+) -> None:
+    case = integration_reference
+    case.powers["spin_temperature"] *= scale
+    if fails:
+        with pytest.raises(
+            AssertionError, match=r"physical values differ.*spin_temperature"
+        ):
+            case.compare()
+    else:
+        case.compare()
+    assert any(
+        key == "reference_mismatch_summary" and value.startswith("spin_temperature ")
+        for key, value in case.request.node.user_properties
+    )
+
+
+@pytest.mark.parametrize(
+    ("field", "tail_power", "fails"),
+    [
+        ("z_reion", 1e-15, False),
+        ("z_reion", 1e-12, True),
+        ("neutral_fraction", 1e-15, True),
+    ],
+)
+def test_integration_zero_power_roundoff_is_limited_to_reionization_redshift(
+    integration_reference: SimpleNamespace, field: str, tail_power: float, fails: bool
+) -> None:
+    case = integration_reference
+    with h5py.File(case.path, "r+") as reference:
+        reference[case.kind][f"power_{field}"][...] = [1.0, 0.0]
+    case.powers[field] = (np.array([1.0, tail_power]) * un.Mpc**3).to(un.kpc**3)
+    if fails:
+        with pytest.raises(AssertionError, match=rf"physical values differ.*{field}"):
+            case.compare()
+    else:
+        case.compare()
+    assert any(
+        key == "reference_mismatch_summary" and value.startswith(f"{field} ")
+        for key, value in case.request.node.user_properties
+    )
+
+
+@pytest.mark.parametrize("omission", ["one_power", "k"])
+def test_integration_rejects_missing_reference_fields(
+    integration_reference: SimpleNamespace, omission: str
+) -> None:
+    case = integration_reference
+    with h5py.File(case.path, "r+") as reference:
+        group = reference[case.kind]
+        if omission == "one_power":
+            del group["power_spin_temperature"]
+        else:
+            del group["k"]
+    with pytest.raises(AssertionError, match="Missing reference"):
+        case.compare()
+    assert not case.calls, "Incomplete references must fail before a simulation starts."
+
+
+def test_integration_rejects_unexpected_reference_power(
+    integration_reference: SimpleNamespace,
+) -> None:
+    case = integration_reference
+    with h5py.File(case.path, "r+") as reference:
+        write_quantity(
+            reference[case.kind], "power_unexpected", np.array([1.0, 2.0]) * un.Mpc**3
+        )
+    with pytest.raises(AssertionError, match="Unexpected reference"):
+        case.compare()
+    assert not case.calls
+
+
+def test_integration_rejects_missing_simulated_power(
+    integration_reference: SimpleNamespace,
+) -> None:
+    case = integration_reference
+    del case.powers["spin_temperature"]
+    with pytest.raises(AssertionError, match="Simulated power fields"):
+        case.compare()
+
+
+@pytest.mark.parametrize("integration_reference", ["lightcone"], indirect=True)
+def test_lightcone_rejects_missing_global_reference(
+    integration_reference: SimpleNamespace,
+) -> None:
+    case = integration_reference
+    with h5py.File(case.path, "r+") as reference:
+        del reference["lightcone/global_neutral_fraction"]
+    with pytest.raises(
+        AssertionError, match=r"Missing reference.*global_neutral_fraction"
+    ):
+        case.compare()
+    assert not case.calls
+
+
+def test_comparison_plot_converts_to_reference_units(tmp_path: Path) -> None:
+    from matplotlib.figure import Figure
+
+    figure = Figure()
+    figure_ref = weakref.ref(figure)
+    axes = None
+    try:
+        axes = figure.subplots(2)
+        k = np.array([0.1, 0.2, 0.3]) / un.Mpc
+        power = np.array([1.0, 2.0, 3.0]) * un.K**2 * un.Mpc**3
+        make_comparison_plot(
+            k,
+            k.to(un.kpc**-1),
+            power,
+            power.to(un.mK**2 * un.Mpc**3),
+            axes,
+            xlab="k",
+            ylab="Temperature power",
+        )
+        np.testing.assert_allclose(
+            axes[0].lines[0].get_ydata(),
+            axes[0].lines[1].get_ydata(),
+            rtol=1e-14,
+            atol=0,
+        )
+        np.testing.assert_allclose(axes[1].lines[0].get_ydata(), 0, rtol=0, atol=1e-14)
+        figure.savefig(tmp_path / "comparison.png")
+    finally:
+        figure.clear()
+        del axes, figure
+        # Release this test's Matplotlib cycles before driver cycle checks run.
+        gc.collect()
+    assert figure_ref() is None, "Comparison plot kept its Figure alive after cleanup."
+
+
+def test_power_spectrum_preserves_amplitude_and_volume_scaling() -> None:
+    """Exercise the power estimator, not only declared dimensions."""
+    grid = np.indices((16, 16, 16))
+    noise = np.random.default_rng(21).normal(0, 0.1, size=grid.shape[1:])
+    field = (np.sin(2 * np.pi * grid[0] / 16) + noise) * un.K
+    small, k = power_spectrum(field, 16 * un.Mpc)
+    converted, converted_k = power_spectrum(field.to(un.mK), 16000 * un.kpc)
+    assert_quantity_close(small, converted, rtol=1e-12)
+    assert_quantity_close(k, converted_k, rtol=1e-12)
+    large, large_k = power_spectrum(field, 32 * un.Mpc)
+    assert_quantity_close(large, 8 * small, rtol=1e-12)
+    assert_quantity_close(large_k, k / 2, rtol=1e-12)
