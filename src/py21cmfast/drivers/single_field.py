@@ -8,6 +8,7 @@ example initial conditions, perturbed fields and ionization fields.
 import logging
 import warnings
 
+import attrs
 import deprecation
 import numpy as np
 from astropy import constants
@@ -87,7 +88,9 @@ def compute_initial_conditions(
             setattr(
                 ics,
                 array,
-                ics.arrays[array].initialize().with_value(val=value * np.ones(shape)),
+                attrs.evolve(ics.arrays[array], shape=shape)
+                .initialize()
+                .with_value(val=value * np.ones(shape)),
             )
         return ics
     else:

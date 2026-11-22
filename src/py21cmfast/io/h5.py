@@ -83,6 +83,20 @@ def _cached_unit(unit: str) -> un.UnitBase:
     return un.Unit(unit)
 
 
+def _validate_array_metadata(output: ostruct.OutputStruct) -> None:
+    """Reject incomplete metadata before modifying an output file or group."""
+    if missing := [
+        name
+        for name, array in output.arrays.items()
+        if array.unit is None
+        or not isinstance(array.description, str)
+        or not array.description.strip()
+    ]:
+        raise ValueError(
+            f"Cannot write Arrays {missing} without unit and description metadata."
+        )
+
+
 def write_output_to_hdf5(
     output: ostruct.OutputStruct,
     path: Path,
@@ -108,6 +122,7 @@ def write_output_to_hdf5(
         loaded and written one at a time, and purged from memory once written, so
         that writing never needs more memory than the largest array.
     """
+    _validate_array_metadata(output)
     if not all(v.state.is_computed for v in output.arrays.values()):
         raise ValueError(
             "Not all boxes have been computed (or maybe some have been purged). Cannot write."
@@ -221,6 +236,7 @@ def write_outputs_to_group(
         Whether to keep all arrays in memory after writing. If False, arrays are
         loaded and written one at a time, and purged from memory once written.
     """
+    _validate_array_metadata(output)
     need_to_close = False
     if isinstance(group, str | Path):
         file = h5py.File(group, "r")
@@ -235,14 +251,6 @@ def write_outputs_to_group(
         output.load_all()
 
     for k, array in output.arrays.items():
-        if (
-            array.unit is None
-            or not isinstance(array.description, str)
-            or not array.description.strip()
-        ):
-            raise ValueError(
-                f"Cannot write Array {k} without unit and description metadata."
-            )
         backend = H5Backend(group.file.filename, f"{group.name}/{k}")
         if keep_in_memory:
             new = array.written_to_disk(backend)
@@ -507,10 +515,22 @@ def _array_from_source(
         )
         # Keep native units for subsequent C calls. Ordinary cache reads reuse the
         # declared unit object, avoiding repeated CompositeUnit construction.
+        stored_unit = (
+            array.unit if unit == array.unit.to_string() else _cached_unit(unit)
+        )
+        if not stored_unit.is_equivalent(array.unit, equivalencies=None):
+            raise un.UnitConversionError(
+                f"Array {name} has cache unit {stored_unit}, "
+                f"which is incompatible with {array.unit}."
+            )
         array = attrs.evolve(array, description=description)
-        if unit != array.unit.to_string():
-            values = un.Quantity(source.backend.read(), _cached_unit(unit), copy=False)
-            return array.with_value(values.to_value(array.unit))
+        if stored_unit != array.unit:
+            stored = source.backend.read()
+            dtype = np.result_type(stored.dtype, array.dtype, np.float64)
+            values = un.Quantity(
+                np.asarray(stored, dtype=dtype), stored_unit, copy=False
+            )
+            return array.with_value(values.to_value(array.unit, equivalencies=None))
         return attrs.evolve(
             array, state=ArrayState(on_disk=True), cache_backend=source.backend
         )

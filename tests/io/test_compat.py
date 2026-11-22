@@ -53,7 +53,14 @@ class TestVersions:
 
     @pytest.mark.parametrize(
         ("version", "n_releases"),
-        [("4.0.0", 3), ("4.1.1", 2), ("4.2", 1), ("4.3.dev12+g12345", 1), ("4.3.0", 0)],
+        [
+            ("4.0.0", 4),
+            ("4.1.1", 3),
+            ("4.2", 2),
+            ("4.3.dev12+g12345", 2),
+            ("4.3.0", 1),
+            ("4.4.0", 0),
+        ],
     )
     def test_releases_since(self, version, n_releases):
         """The right releases apply to files of each version."""
@@ -223,6 +230,8 @@ class TestFormatHistory:
         desc = migrate.describe_format_changes(since="4.2")
         assert "v4.0.0 -> v4.1.0:" not in desc
         assert "v4.2.0 -> v4.3.0:" in desc
+        assert "Array datasets store their unit and description" in desc
+        assert "v4.3.0 -> v4.4.0:" in desc
 
     def test_parameter_renames_are_current(self):
         """Renamed parameters must exist in this version (unless renamed again)."""

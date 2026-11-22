@@ -48,6 +48,7 @@ from ..wrapper import outputs as ostruct
 from . import h5
 from ._compat import current_struct_name, describe_format_changes, is_legacy
 from ._compat_framework import (
+    ArrayOnDisk,
     CompatibilityWarning,
     FormatDeprecationWarning,
     UnconvertibleError,
@@ -196,6 +197,11 @@ def migrate_cache_file(
         return MigrationResult(path, "unconvertible", message=str(e))
 
     version = str(raw.version)
+    missing_metadata = any(
+        isinstance(array, ArrayOnDisk)
+        and (array.unit is None or array.description is None)
+        for array in raw.arrays.values()
+    )
     kind = current_struct_name(raw.kind)
     if kinds is not None and kind not in kinds:
         return MigrationResult(
@@ -225,7 +231,7 @@ def migrate_cache_file(
     common = {"destination": destination, "kind": kind, "version": version}
 
     if destination.exists() and destination.samefile(path):
-        if not is_legacy(raw.version):
+        if not is_legacy(raw.version) and not missing_metadata:
             return MigrationResult(path, "up-to-date", **common)
         # Original files are never replaced (even with overwrite=True).
         return MigrationResult(

@@ -479,7 +479,7 @@ def field_metadata_inputs(
         CELL_RECOMB=request.param == "E-INTEGRAL",
         R_BUBBLE_MAX=50.0,
         MINIMIZE_MEMORY=False,
-        USE_LYA_HEATING=True,
+        USE_LYA_HEATING=request.param == "CHMF-SAMPLER",
         USE_X_RAY_HEATING=True,
         LYA_MULTIPLE_SCATTERING=True,
         SOURCE_MODEL=request.param,
@@ -496,6 +496,7 @@ def _check_field_metadata(
     expected_names = {name for name in expected if optional_fields.get(name, True)}
     assert set(box.arrays) == expected_names
     for name, array in box.arrays.items():
+        assert isinstance(expected[name], un.UnitBase), name
         assert array.unit.is_equivalent(expected[name], equivalencies=None), name
 
 
@@ -505,36 +506,31 @@ def test_initial_conditions_field_metadata(
     high_resolution: bool,
 ) -> None:
     """Distinguish the initial displacement fields from evolved velocities."""
-    algorithm, relative_velocity = "2LPT", True
     # Fluctuating relative velocities require the minihalo thermal/recombination model.
     inputs = default_input_struct_lc.evolve_input_structs(
         PERTURB_ON_HIGH_RES=high_resolution,
-        PERTURB_ALGORITHM=algorithm,
-        V_CB_MODEL="FLUCTS" if relative_velocity else "NONE",
+        PERTURB_ALGORITHM="2LPT",
+        V_CB_MODEL="FLUCTS",
         POWER_SPECTRUM="CLASS",
-        USE_MCGS=relative_velocity,
-        USE_TS_FLUCT=relative_velocity,
-        RECOMB_MODEL="inhomogeneous" if relative_velocity else "none",
+        USE_MCGS=True,
+        USE_TS_FLUCT=True,
+        RECOMB_MODEL="inhomogeneous",
         R_BUBBLE_MAX=50.0,
-        M_TURN_STELLAR_FEEDBACK=(
-            5.0
-            if relative_velocity
-            else default_input_struct_lc.astro_params.M_TURN_STELLAR_FEEDBACK
-        ),
+        M_TURN_STELLAR_FEEDBACK=5.0,
     )
     expected = {
         "lowres_density": un.dimensionless_unscaled,
         "hires_density": un.dimensionless_unscaled,
         "lowres_vcb": un.m / un.s,
     }
-    optional_fields = {"lowres_vcb": relative_velocity}
+    optional_fields = {}
     for resolution in ("lowres", "hires"):
         for axis in "xyz":
             name = f"{resolution}_v{axis}"
             expected[name] = un.m
             optional_fields[name] = (resolution == "hires") == high_resolution
             expected[name + "_2LPT"] = un.m
-            optional_fields[name + "_2LPT"] = algorithm == "2LPT" and (
+            optional_fields[name + "_2LPT"] = (
                 resolution == "hires" or not high_resolution
             )
     _check_field_metadata(
@@ -548,9 +544,8 @@ def test_perturbed_field_metadata(
     default_input_struct: InputParameters,
 ) -> None:
     """Check density and the velocity components enabled for each geometry."""
-    dimension, keep_3d_velocities = 2, True
     inputs = default_input_struct.evolve_input_structs(
-        HII_DIM=dimension, DIM=2 * dimension, KEEP_3D_VELOCITIES=keep_3d_velocities
+        HII_DIM=2, DIM=4, KEEP_3D_VELOCITIES=True
     )
     _check_field_metadata(
         ox.PerturbedField.new(inputs=inputs, redshift=10.0),
@@ -558,10 +553,7 @@ def test_perturbed_field_metadata(
             "density": un.dimensionless_unscaled,
             **{f"velocity_{axis}": un.m / un.s for axis in "xyz"},
         },
-        optional_fields={
-            f"velocity_{axis}": dimension > 1 and (axis == "z" or keep_3d_velocities)
-            for axis in "xyz"
-        },
+        optional_fields={},
     )
 
 
@@ -569,15 +561,14 @@ def test_brightness_temperature_field_metadata(
     default_input_struct_lc: InputParameters,
 ) -> None:
     """Check temperature dimensions and the optional optical-depth field."""
-    spin_temperature = True
-    inputs = default_input_struct_lc.evolve_input_structs(USE_TS_FLUCT=spin_temperature)
+    inputs = default_input_struct_lc.evolve_input_structs(USE_TS_FLUCT=True)
     _check_field_metadata(
         ox.BrightnessTemp.new(inputs=inputs, redshift=10.0),
         {
             "brightness_temp": un.K,
             "tau_21": un.dimensionless_unscaled,
         },
-        optional_fields={"tau_21": spin_temperature},
+        optional_fields={},
     )
 
 
@@ -674,8 +665,7 @@ def test_emissivity_fields_field_metadata(
 ) -> None:
     """Check deposited counts, densities, and the normalized ionizing budget."""
     inputs = field_metadata_inputs
-    extra = True
-    with config.use(EXTRA_EMISSIVITY_FIELDS=extra):
+    with config.use(EXTRA_EMISSIVITY_FIELDS=True):
         box = ox.EmissivityFields.new(inputs=inputs, redshift=10.0)
     _check_field_metadata(
         box,
@@ -691,10 +681,7 @@ def test_emissivity_fields_field_metadata(
             "fesc_weighted_sfrd": un.kg / (un.s * un.m**3),
         },
         optional_fields={
-            "halo_number": extra,
-            "halo_mass_density": extra,
-            "stellar_mass_density_acg": extra,
-            "stellar_mass_density_mcg": extra and inputs.astro_options.USE_MCGS,
+            "stellar_mass_density_mcg": inputs.astro_options.USE_MCGS,
             "sfrd_acg": inputs.astro_options.USE_TS_FLUCT,
             "sfrd_mcg": inputs.astro_options.USE_TS_FLUCT
             and inputs.astro_options.USE_MCGS,
@@ -727,35 +714,26 @@ def test_radiation_fields_setup_field_metadata(
         "ion": un.cm**2 * un.Hz,
         "lya": un.cm**3 / un.sr,
     }.items():
-        expected[f"freq_int_{integral}_tbl"] = (dimension, ("frequency integral",))
-        expected[f"freq_int_{integral}_tbl_diff"] = (
-            dimension,
-            ("frequency integral", "difference"),
-        )
-    for population, label in (("acg", "atomic"), ("mcg", "molecular")):
+        expected[f"freq_int_{integral}_tbl"] = dimension
+        expected[f"freq_int_{integral}_tbl_diff"] = dimension
+    for population in ("acg", "mcg"):
         for band in ("lya", "lw"):
             name = f"filtered_sfrd_{population}_for_{band}"
-            expected[name] = (
-                un.kg / (un.s * un.m**3),
-                ("shell-filtered", "star-formation-rate density", label),
-            )
+            expected[name] = un.kg / (un.s * un.m**3)
             optional[name] = (
-                (population == "acg" or astro.USE_MCGS)
+                population == "acg" or astro.USE_MCGS
                 if band == "lya"
                 else astro.USE_MCGS and astro.LYA_MULTIPLE_SCATTERING
             )
         for channel in ("continuum", "injected", "continuum_injected"):
             name = f"lya_flux_{channel}_prefactor_{population}"
-            expected[name] = (un.Hz**-1, ("lyman-alpha", "spectral factor", label))
+            expected[name] = un.Hz ** (-1)
             optional[name] = (population == "acg" or astro.USE_MCGS) and (
                 (channel != "continuum_injected" and astro.USE_LYA_HEATING)
-                or (channel == "continuum_injected" and not astro.USE_LYA_HEATING)
+                or (channel == "continuum_injected" and (not astro.USE_LYA_HEATING))
             )
         name = f"lyw_flux_prefactor_{population}"
-        expected[name] = (
-            un.dimensionless_unscaled,
-            ("lyman-werner", "spectral factor", label),
-        )
+        expected[name] = un.dimensionless_unscaled
         optional[name] = astro.USE_MCGS
     _check_field_metadata(
         ox.RadiationFieldsSetup.new(inputs=inputs, redshift=10.0),
@@ -770,28 +748,16 @@ def test_radiation_fields_field_metadata(
     """Distinguish temperature/ionization rates and photon-number/energy intensity."""
     inputs = field_metadata_inputs
     astro = inputs.astro_options
-    number_intensity = un.cm**-2 / (un.s * un.Hz * un.sr)
+    number_intensity = un.cm ** (-2) * un.s ** (-1) * un.Hz ** (-1) * un.sr ** (-1)
     _check_field_metadata(
         ox.RadiationFields.new(inputs=inputs, redshift=10.0),
         {
             "xray_heating_rate": un.K / un.s,
-            "xray_ionization_rate": un.s**-1,
-            "xray_lya_flux": (
-                number_intensity,
-                ("lyman-alpha", "photon-number", "x-rays"),
-            ),
-            "lya_flux_continuum": (
-                number_intensity,
-                ("lyman-alpha", "photon-number", "continuum"),
-            ),
-            "lya_flux_injected": (
-                number_intensity,
-                ("lyman-alpha", "photon-number", "injected"),
-            ),
-            "lya_flux_continuum_injected": (
-                number_intensity,
-                ("lyman-alpha", "photon-number", "continuum", "injected"),
-            ),
+            "xray_ionization_rate": un.s ** (-1),
+            "xray_lya_flux": number_intensity,
+            "lya_flux_continuum": number_intensity,
+            "lya_flux_injected": number_intensity,
+            "lya_flux_continuum_injected": number_intensity,
             "lyw_flux": un.erg / (un.s * un.cm**2 * un.Hz * un.sr),
         },
         optional_fields={

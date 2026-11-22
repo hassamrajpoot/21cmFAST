@@ -77,13 +77,16 @@ def test_run_global_evolution_without_source_model(
     assert isinstance(global_evolution, GlobalEvolution)
 
 
-def test_run_global_evolution_without_Ts(default_input_struct):
+@pytest.mark.parametrize("non_cubic_factor", [1, 2])
+def test_run_global_evolution_without_Ts(default_input_struct, non_cubic_factor):
     """Test that run_global_evolution doesn't crash when USE_TS_FLUCT=False."""
     with pytest.warns(
         UserWarning, match=r"^Your inputs\.astro_options\.USE_TS_FLUCT = False"
     ):
         global_evolution = p21c.run_global_evolution(
-            inputs=default_input_struct.evolve_input_structs(USE_TS_FLUCT=False)
+            inputs=default_input_struct.evolve_input_structs(
+                USE_TS_FLUCT=False, NON_CUBIC_FACTOR=non_cubic_factor
+            )
         )
     assert isinstance(global_evolution, GlobalEvolution)
 

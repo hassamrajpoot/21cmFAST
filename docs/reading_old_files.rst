@@ -59,21 +59,23 @@ version of ``21cmFAST`` that wrote them. Their arrays can still be read directly
 
 Array metadata
 --------------
-Cache datasets now store ``unit`` and ``description`` attributes. Missing
-attributes in supported v4 files are recovered from the field declarations,
-after any format conversions. Migrating such a file writes the recovered
-metadata explicitly. v4 files follow the same support policy as other v4
-outputs: supported in v4, deprecated in v5, and rejected in v6. Files written by
-v5 or later must contain their array metadata.
+Cache datasets store ``unit`` and ``description`` attributes. For files written
+before v4.4, missing attributes are recovered from the field declarations after
+format conversions. Files written by v4.4 or later must contain these attributes.
+
+To write recovered metadata explicitly, migrate to a different destination with
+``21cmfast migrate SOURCE --out DESTINATION``. Migration never replaces a source
+file, so requesting the same canonical cache location does not add attributes.
+These files follow the version-support policy described above.
 
 Cached values in equivalent units are converted to the native field unit before
-use. The ordinary path, with units matching the declarations, remains lazy.
-Incompatible dimensions raise an error.
+use. Conversions require matching physical dimensions. A conversion reads the
+values; save the result to a different destination to cache it in the native unit.
 
-Standalone legacy ``Array`` pickles do not identify a field or record a cache
-format version. Their unknown units cannot be inferred safely: raw access is
-retained, but quantity conversion raises an error until the metadata is supplied.
-This exception does not produce unitless fields when reading versioned caches.
+``Array`` objects pickled before metadata existed, either alone or inside an
+output structure, can contain unknown units. Their raw values are accessible,
+but quantity conversion and HDF5 writing require explicit metadata and raise an
+error when it is missing.
 
 Migrating a cache
 -----------------

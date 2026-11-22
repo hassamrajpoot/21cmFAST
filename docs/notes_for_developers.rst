@@ -72,8 +72,9 @@ private with a leading underscore or make it a ``@property`` of the class.
 If you modify an output struct, which usually house a number of array quantities
 (often float pointers, but not necessarily), then you'll again need to modify the
 corresponding class in the wrapper. In particular, you'll need to add an entry for that
-particular array as an ``_arrayfield()`` to the attributes the class and set its shape in the ``new()``
-method. Any output which depends on the new array must also have it added to its
+particular array as an ``_arrayfield()`` to the attributes of the class and set its
+shape, ``unit``, and nonempty ``description`` in the ``new()`` method. Dimensionless
+fields require an explicit ``astropy.units.dimensionless_unscaled`` unit. Any output which depends on the new array must also have it added to its
 ``get_required_input_arrays()`` method.
 
 If the C backend uses new input or output fields, they must be added to the structs

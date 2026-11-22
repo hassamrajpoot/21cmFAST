@@ -130,7 +130,9 @@ def compute_global_reionization_at_z(
         setattr(
             box,
             name,
-            box.arrays[name].initialize().with_value(val=val * np.ones(shape)),
+            attrs.evolve(box.arrays[name], shape=shape)
+            .initialize()
+            .with_value(val=val * np.ones(shape)),
         )
     box.log10_mturn_ave_acg = np.log10(M_turn_acg)
     if M_turn_mcg is not None:

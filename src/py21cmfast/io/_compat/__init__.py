@@ -51,6 +51,7 @@ from packaging.version import Version
 
 from .. import _compat_framework
 from .._compat_framework import (
+    AddArrayMetadata,
     ConvertOutputStruct,
     FormatRelease,
     RawInputs,
@@ -61,7 +62,7 @@ from .._compat_framework import (
     UnconvertibleOutputStruct,
     parse_version,
 )
-from . import _v4_0_v4_1, _v4_1_v4_2, _v4_2_v4_3
+from . import _v4_0_v4_1, _v4_1_v4_2, _v4_2_v4_3, _v4_3_v4_4
 
 #: The history of changes to the format of 21cmFAST's output files, since the oldest
 #: supported version, in the order in which they were made.
@@ -69,6 +70,7 @@ FORMAT_HISTORY: tuple[FormatRelease, ...] = (
     _v4_0_v4_1.RELEASE,
     _v4_1_v4_2.RELEASE,
     _v4_2_v4_3.RELEASE,
+    _v4_3_v4_4.RELEASE,
 )
 
 
@@ -90,7 +92,7 @@ def restore_array_metadata(
     unit: str,
     description: str,
 ) -> tuple[str, str]:
-    """Recover metadata omitted by the v4 cache format.
+    """Recover metadata omitted before its recorded format change.
 
     Parameters
     ----------
@@ -104,22 +106,22 @@ def restore_array_metadata(
     Returns
     -------
     tuple of str
-        Stored metadata, with missing v4 attributes filled from the declaration.
+        Stored metadata, with missing legacy attributes filled from the declaration.
 
     Notes
     -----
-    This additive extension of the v4 dataset format does not change its numbers.
-    v4 files without metadata can be migrated while v4 is supported; the existing
-    support policy rejects them in v6. Files written by v5 or later must provide
-    their own metadata. Unversioned standalone pickles are not cache files and
-    cannot use a field declaration to recover an unknown physical unit.
+    Missing attributes are recovered only when the array-metadata format change
+    applies to this file. Other legacy format changes do not permit missing
+    metadata. Version support is checked by the reader before this function runs.
+    Unversioned pickles cannot recover unknown units through this format history.
     """
     version = parse_version(version)
-    if _compat_framework.support_status(version) == "unsupported":
-        raise _compat_framework.UnsupportedVersionError(
-            f"Files written by 21cmFAST v{version} are not supported."
-        )
-    if (source.unit is None or source.description is None) and version.major != 4:
+    predates_metadata = any(
+        isinstance(change, AddArrayMetadata)
+        for release in releases_since(version)
+        for change in release.changes
+    )
+    if (source.unit is None or source.description is None) and not predates_metadata:
         raise ValueError(
             f"Array {source.backend.dataset} is missing unit or description "
             f"metadata in a v{version} cache file."

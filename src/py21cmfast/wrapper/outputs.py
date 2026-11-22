@@ -62,7 +62,7 @@ _HEATING_FREQ_INTEGRAL_UNIT = un.erg * un.cm**2 * un.Hz
 _IONIZATION_FREQ_INTEGRAL_UNIT = un.cm**2 * un.Hz
 _LYA_FREQ_INTEGRAL_UNIT = un.cm**3 / un.sr
 _LYA_SPECTRUM_UNIT = un.Hz**-1
-_LYA_NUMBER_INTENSITY_UNIT = un.cm**-2 / (un.s * un.Hz * un.sr)
+_LYA_NUMBER_INTENSITY_UNIT = un.cm**-2 * un.s**-1 * un.Hz**-1 * un.sr**-1
 
 _ALL_OUTPUT_STRUCTS = {}
 

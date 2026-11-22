@@ -225,6 +225,15 @@ def metadata_cache(
     return box, path
 
 
+def _stamp_pre_metadata_version(file: h5py.File, box: ox.OutputStruct) -> None:
+    """Identify files written before array metadata was introduced."""
+    for name in ("OutputFields", "InputParameters"):
+        file[box._name][name].attrs["21cmFAST-version"] = "4.3.0"
+
+
+@pytest.mark.filterwarnings(
+    "ignore::py21cmfast.io._compat_framework.FormatDeprecationWarning"
+)
 @pytest.mark.parametrize("legacy", [False, True])
 @pytest.mark.parametrize("cache_on_access", [False, True])
 def test_output_metadata_roundtrip(
@@ -238,6 +247,8 @@ def test_output_metadata_roundtrip(
             if legacy:
                 del dataset.attrs["unit"]
                 del dataset.attrs["description"]
+        if legacy:
+            _stamp_pre_metadata_version(file, box)
     restored = h5.read_output_struct(path)
     for name, array in restored.arrays.items():
         assert array.unit == box.arrays[name].unit
@@ -251,36 +262,64 @@ def test_output_metadata_roundtrip(
         assert array.state.computed_in_mem == cache_on_access
 
 
+@pytest.mark.parametrize(
+    ("stored_unit", "stored_value", "native_value"),
+    [
+        ("1 / s", 2e-12, 2.0),
+        ("1e-12 s-1", 2.0, 2.0),
+        ("1e28 / s", 1e-35, 1e5),
+    ],
+    ids=["scaled", "equivalent-spelling", "float32-intermediate"],
+)
 def test_cache_metadata_converts_values_to_native_units(
     metadata_cache: tuple[ox.IonizedBox, Path],
+    stored_unit: str,
+    stored_value: float,
+    native_value: float,
 ) -> None:
     box, path = metadata_cache
     with h5py.File(path, "r+") as file:
         dataset = file[box._name]["OutputFields"]["ionisation_rate_G12"]
-        dataset[...] = 2e-12
-        dataset.attrs["unit"] = "1 / s"
+        dataset[...] = stored_value
+        dataset.attrs["unit"] = stored_unit
         dataset.attrs["description"] = "Stored photoionization rate."
     restored = h5.read_output_struct(path)
     array = restored.arrays["ionisation_rate_G12"]
     assert array.unit == box.arrays["ionisation_rate_G12"].unit
     assert array.description == "Stored photoionization rate."
-    np.testing.assert_allclose(restored.ionisation_rate_G12, 2.0, rtol=1e-6, atol=0)
+    if stored_unit == "1e-12 s-1":
+        assert array.state.on_disk
+        assert array._value is None
+        assert array.cache_backend is not None
+    assert restored.ionisation_rate_G12.dtype == array.dtype
+    assert np.isfinite(restored.ionisation_rate_G12).all()
+    np.testing.assert_allclose(
+        restored.ionisation_rate_G12, native_value, rtol=1e-6, atol=0
+    )
 
 
+@pytest.mark.parametrize("spectral_equivalency", [False, True])
 def test_cache_rejects_incompatible_unit_metadata(
-    metadata_cache: tuple[ox.IonizedBox, Path],
+    metadata_cache: tuple[ox.IonizedBox, Path], spectral_equivalency: bool
 ) -> None:
-    from astropy.units import UnitConversionError
+    from astropy import units as un
 
     box, path = metadata_cache
     with h5py.File(path, "r+") as file:
-        file[box._name]["OutputFields"]["ionisation_rate_G12"].attrs["unit"] = "Mpc"
-    with pytest.raises(UnitConversionError):
+        dataset = file[box._name]["OutputFields"]["ionisation_rate_G12"]
+        dataset[...] = 500
+        dataset.attrs["unit"] = "nm"
+    equivalencies = un.spectral() if spectral_equivalency else []
+    with (
+        un.set_enabled_equivalencies(equivalencies),
+        pytest.raises(un.UnitConversionError),
+    ):
         h5.read_output_struct(path)
 
 
+@pytest.mark.parametrize("existing_file", [False, True])
 def test_cache_writer_rejects_unknown_legacy_metadata(
-    metadata_cache: tuple[ox.IonizedBox, Path], tmp_path: Path
+    metadata_cache: tuple[ox.IonizedBox, Path], tmp_path: Path, existing_file: bool
 ) -> None:
     from py21cmfast.wrapper.arrays import Array
 
@@ -290,59 +329,49 @@ def test_cache_writer_rejects_unknown_legacy_metadata(
     legacy = object.__new__(Array)
     legacy.__setstate__(state)
     box.neutral_fraction = legacy
+    target = metadata_cache[1] if existing_file else tmp_path / "unknown-metadata.h5"
+    before = target.read_bytes() if existing_file else None
     with pytest.raises(ValueError, match="without unit and description"):
-        h5.write_output_to_hdf5(box, tmp_path / "unknown-metadata.h5")
+        h5.write_output_to_hdf5(box, target)
+    if existing_file:
+        assert target.read_bytes() == before
+    else:
+        assert not target.exists()
 
 
-@pytest.mark.parametrize("current", ["4.3.2", "5.0.0", "6.0.0"])
-def test_unitless_v4_cache_follows_support_policy(
+@pytest.mark.parametrize("source_version", ["4.4.0", "5.0.0"])
+@pytest.mark.filterwarnings(
+    "ignore::py21cmfast.io._compat_framework.FormatDeprecationWarning"
+)
+def test_cache_from_metadata_format_requires_metadata(
     metadata_cache: tuple[ox.IonizedBox, Path],
     monkeypatch: pytest.MonkeyPatch,
-    current: str,
+    source_version: str,
 ) -> None:
     from packaging.version import Version
 
+    from py21cmfast.io import _compat
     from py21cmfast.io import _compat_framework as framework
 
     box, path = metadata_cache
     with h5py.File(path, "r+") as file:
         fields = file[box._name]["OutputFields"]
-        fields.attrs["21cmFAST-version"] = "4.3.1"
-        file[box._name]["InputParameters"].attrs["21cmFAST-version"] = "4.3.1"
-        for dataset in fields.values():
-            del dataset.attrs["unit"]
-            del dataset.attrs["description"]
-    monkeypatch.setattr(framework, "CURRENT_VERSION", Version(current))
-    if current.startswith("6"):
-        with pytest.raises(framework.UnsupportedVersionError):
-            h5.read_output_struct(path)
-        return
-    if current.startswith("5"):
-        with pytest.warns(framework.FormatDeprecationWarning):
-            restored = h5.read_output_struct(path)
-    else:
-        restored = h5.read_output_struct(path)
-    assert all(array.unit is not None for array in restored.arrays.values())
-
-
-def test_unitless_v5_cache_is_not_treated_as_legacy(
-    metadata_cache: tuple[ox.IonizedBox, Path], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    from packaging.version import Version
-
-    from py21cmfast.io import _compat_framework as framework
-
-    box, path = metadata_cache
-    with h5py.File(path, "r+") as file:
-        fields = file[box._name]["OutputFields"]
-        fields.attrs["21cmFAST-version"] = "5.0.0"
-        file[box._name]["InputParameters"].attrs["21cmFAST-version"] = "5.0.0"
+        fields.attrs["21cmFAST-version"] = source_version
+        file[box._name]["InputParameters"].attrs["21cmFAST-version"] = source_version
         del fields["neutral_fraction"].attrs["unit"]
     monkeypatch.setattr(framework, "CURRENT_VERSION", Version("5.0.0"))
+    monkeypatch.setattr(
+        _compat,
+        "FORMAT_HISTORY",
+        (*_compat.FORMAT_HISTORY, framework.FormatRelease("4.4.0", "4.5.0", [])),
+    )
     with pytest.raises(ValueError, match="missing unit or description"):
         h5.read_output_struct(path)
 
 
+@pytest.mark.filterwarnings(
+    "ignore::py21cmfast.io._compat_framework.FormatDeprecationWarning"
+)
 def test_migration_writes_recovered_array_metadata(
     metadata_cache: tuple[ox.IonizedBox, Path], tmp_path: Path
 ) -> None:
@@ -350,16 +379,30 @@ def test_migration_writes_recovered_array_metadata(
 
     box, path = metadata_cache
     with h5py.File(path, "r+") as file:
+        _stamp_pre_metadata_version(file, box)
         for dataset in file[box._name]["OutputFields"].values():
             del dataset.attrs["unit"]
             del dataset.attrs["description"]
-    result = migrate.migrate_cache_file(path, p21c.OutputCache(tmp_path / "migrated"))
+    cache = p21c.OutputCache(tmp_path / "migrated")
+    result = migrate.migrate_cache_file(path, cache)
     assert result.status == "migrated", result.message
     with h5py.File(result.destination, "r") as file:
         for name, dataset in file[box._name]["OutputFields"].items():
             assert dataset.attrs["unit"] == box.arrays[name].unit.to_string()
             assert dataset.attrs["description"] == box.arrays[name].description
             np.testing.assert_array_equal(dataset[...], 2)
+
+    assert migrate.migrate_cache_file(result.destination, cache).status == "up-to-date"
+    with h5py.File(result.destination, "r+") as file:
+        _stamp_pre_metadata_version(file, box)
+        for dataset in file[box._name]["OutputFields"].values():
+            del dataset.attrs["unit"]
+            del dataset.attrs["description"]
+    before = result.destination.read_bytes()
+    same_location = migrate.migrate_cache_file(result.destination, cache)
+    assert same_location.status == "exists"
+    assert "different destination" in same_location.message
+    assert result.destination.read_bytes() == before
 
 
 class TestLoadHighLevelSimulation:

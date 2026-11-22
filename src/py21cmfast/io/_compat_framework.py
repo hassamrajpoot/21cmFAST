@@ -303,6 +303,20 @@ class FormatChange:
 
 
 @attrs.define(frozen=True)
+class AddArrayMetadata(FormatChange):
+    """Array datasets gained unit and description attributes.
+
+    The reader recovers missing attributes from the converted field declarations,
+    after the other format changes have been applied.
+    """
+
+    @property
+    def description(self) -> str:
+        """A human-readable description of the change."""
+        return "Array datasets store their unit and description as attributes"
+
+
+@attrs.define(frozen=True)
 class RenameParameter(FormatChange):
     """An input parameter was renamed (and possibly moved to another struct)."""
 
