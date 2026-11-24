@@ -306,6 +306,7 @@ class TestOutputCache:
             kwargs = {
                 "inputs": default_input_struct,
                 "kind": field.__class__.__name__,
+                "all_seeds": False,
             }
             if field.__class__ != InitialConditions:
                 kwargs["redshift"] = field.redshift

@@ -728,6 +728,8 @@ def test_direct_quantity_access_preserves_raw_field_and_copy_contract(
     field += 1
     assert field.get_quantity().flat[0] == 4 * un.K
     assert quantity.flat[0] == 4 * un.K
+    _, whole = np.modf(field, out=(None, field))
+    assert whole is field
 
 
 @pytest.mark.parametrize(

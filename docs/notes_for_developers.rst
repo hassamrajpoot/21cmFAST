@@ -74,7 +74,8 @@ If you modify an output struct, which usually house a number of array quantities
 corresponding class in the wrapper. In particular, you'll need to add an entry for that
 particular array as an ``_arrayfield()`` to the attributes of the class and set its
 shape, ``unit``, and nonempty ``description`` in the ``new()`` method. Dimensionless
-fields require an explicit ``astropy.units.dimensionless_unscaled`` unit. Any output which depends on the new array must also have it added to its
+fields require an explicit ``astropy.units.dimensionless_unscaled`` unit. Any output
+which depends on the new array must also have it added to its
 ``get_required_input_arrays()`` method.
 
 If the C backend uses new input or output fields, they must be added to the structs

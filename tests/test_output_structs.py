@@ -721,16 +721,16 @@ def test_radiation_fields_setup_field_metadata(
             name = f"filtered_sfrd_{population}_for_{band}"
             expected[name] = un.kg / (un.s * un.m**3)
             optional[name] = (
-                population == "acg" or astro.USE_MCGS
+                (population == "acg" or astro.USE_MCGS)
                 if band == "lya"
                 else astro.USE_MCGS and astro.LYA_MULTIPLE_SCATTERING
             )
         for channel in ("continuum", "injected", "continuum_injected"):
             name = f"lya_flux_{channel}_prefactor_{population}"
-            expected[name] = un.Hz ** (-1)
+            expected[name] = un.Hz**-1
             optional[name] = (population == "acg" or astro.USE_MCGS) and (
                 (channel != "continuum_injected" and astro.USE_LYA_HEATING)
-                or (channel == "continuum_injected" and (not astro.USE_LYA_HEATING))
+                or (channel == "continuum_injected" and not astro.USE_LYA_HEATING)
             )
         name = f"lyw_flux_prefactor_{population}"
         expected[name] = un.dimensionless_unscaled
@@ -748,12 +748,12 @@ def test_radiation_fields_field_metadata(
     """Distinguish temperature/ionization rates and photon-number/energy intensity."""
     inputs = field_metadata_inputs
     astro = inputs.astro_options
-    number_intensity = un.cm ** (-2) * un.s ** (-1) * un.Hz ** (-1) * un.sr ** (-1)
+    number_intensity = un.cm**-2 * un.s**-1 * un.Hz**-1 * un.sr**-1
     _check_field_metadata(
         ox.RadiationFields.new(inputs=inputs, redshift=10.0),
         {
             "xray_heating_rate": un.K / un.s,
-            "xray_ionization_rate": un.s ** (-1),
+            "xray_ionization_rate": un.s**-1,
             "xray_lya_flux": number_intensity,
             "lya_flux_continuum": number_intensity,
             "lya_flux_injected": number_intensity,

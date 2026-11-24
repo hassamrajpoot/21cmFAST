@@ -231,9 +231,6 @@ def _stamp_pre_metadata_version(file: h5py.File, box: ox.OutputStruct) -> None:
         file[box._name][name].attrs["21cmFAST-version"] = "4.3.0"
 
 
-@pytest.mark.filterwarnings(
-    "ignore::py21cmfast.io._compat_framework.FormatDeprecationWarning"
-)
 @pytest.mark.parametrize("legacy", [False, True])
 @pytest.mark.parametrize("cache_on_access", [False, True])
 def test_output_metadata_roundtrip(
@@ -369,12 +366,14 @@ def test_cache_from_metadata_format_requires_metadata(
         h5.read_output_struct(path)
 
 
-@pytest.mark.filterwarnings(
-    "ignore::py21cmfast.io._compat_framework.FormatDeprecationWarning"
-)
 def test_migration_writes_recovered_array_metadata(
-    metadata_cache: tuple[ox.IonizedBox, Path], tmp_path: Path
+    metadata_cache: tuple[ox.IonizedBox, Path],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from packaging.version import Version
+
+    from py21cmfast.io import _compat_framework as framework
     from py21cmfast.io import migrate
 
     box, path = metadata_cache
@@ -399,10 +398,34 @@ def test_migration_writes_recovered_array_metadata(
             del dataset.attrs["unit"]
             del dataset.attrs["description"]
     before = result.destination.read_bytes()
-    same_location = migrate.migrate_cache_file(result.destination, cache)
+    # Development builds can share a version while recording different metadata.
+    with monkeypatch.context() as patch:
+        patch.setattr(framework, "CURRENT_VERSION", Version("4.3.0"))
+        same_location = migrate.migrate_cache_file(result.destination, cache)
     assert same_location.status == "exists"
     assert "different destination" in same_location.message
     assert result.destination.read_bytes() == before
+
+
+@pytest.mark.parametrize("stored", [b"1e-12 / s", 5.0], ids=["bytes", "number"])
+def test_cache_unit_attribute_types(
+    metadata_cache: tuple[ox.IonizedBox, Path], stored: bytes | float
+) -> None:
+    box, path = metadata_cache
+    with h5py.File(path, "r+") as file:
+        dataset = file[box._name]["OutputFields"]["ionisation_rate_G12"]
+        dataset.attrs["unit"] = (
+            np.bytes_(stored) if isinstance(stored, bytes) else stored
+        )
+        if isinstance(stored, bytes):
+            dataset.attrs["description"] = np.bytes_(b"Stored rate.")
+    if isinstance(stored, bytes):
+        array = h5.read_output_struct(path).arrays["ionisation_rate_G12"]
+        assert array.state.on_disk
+        assert array.description == "Stored rate."
+    else:
+        with pytest.raises(TypeError, match="Invalid array metadata"):
+            h5.read_output_struct(path)
 
 
 class TestLoadHighLevelSimulation:
