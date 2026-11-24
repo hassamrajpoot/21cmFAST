@@ -16,6 +16,7 @@ extensions = [
     "sphinx.ext.doctest",
     "sphinx.ext.extlinks",
     "sphinx.ext.ifconfig",
+    "sphinx.ext.intersphinx",
     "sphinx.ext.napoleon",
     "sphinx.ext.todo",
     "sphinx.ext.viewcode",
@@ -34,6 +35,10 @@ if os.getenv("SPELLCHECK"):
     spelling_lang = "en_US"
 
 autosectionlabel_prefix_document = True
+
+intersphinx_mapping = {
+    "astropy": ("https://docs.astropy.org/en/stable/", None),
+}
 # autodoc_use_legacy_class_based = True
 
 # Auto-API settings
