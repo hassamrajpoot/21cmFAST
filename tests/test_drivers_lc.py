@@ -225,8 +225,14 @@ def test_lc_partial_eval(rectlcn, default_input_struct_lc, tmpdirec, lc, cache):
 
 
 def test_lc_lowerz_than_photon_cons(
-    ic, default_input_struct_lc, default_astro_options, max_redshift, cache
+    ic, default_input_struct_lc, default_astro_options, max_redshift, cache, monkeypatch
 ):
+    def unexpected_setup(**kwargs):
+        pytest.fail(
+            "Invalid redshifts must be rejected before photon-conservation setup."
+        )
+
+    monkeypatch.setattr("py21cmfast.drivers.coeval.setup_photon_cons", unexpected_setup)
     inputs = default_input_struct_lc.clone(
         node_redshifts=p21c.get_logspaced_redshifts(
             min_redshift=1.9,

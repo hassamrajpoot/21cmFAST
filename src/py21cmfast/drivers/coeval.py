@@ -966,6 +966,19 @@ def _setup_ics_and_pfs_for_scrolling(
     overdensity_z0: float | None = None,
     **iokw,
 ) -> tuple[InitialConditions, list[PerturbedField], list[HaloCatalog], dict]:
+    # Reject invalid requests before photon-conservation setup mutates C state.
+    if (
+        inputs.astro_options.PHOTON_CONS_TYPE == "z-photoncons"
+        and np.amin(all_redshifts) < inputs.astro_params.PHOTONCONS_CALIBRATION_END
+    ):
+        raise ValueError(
+            f"You have passed a redshift (z = {np.amin(all_redshifts)}) that is lower than"
+            "the endpoint of the photon non-conservation correction"
+            f"(astro_params.PHOTONCONS_CALIBRATION_END = {inputs.astro_params.PHOTONCONS_CALIBRATION_END})."
+            "If this behaviour is desired then set astro_params.PHOTONCONS_CALIBRATION_END"
+            f"to a value lower than z = {np.amin(all_redshifts)}."
+        )
+
     if initial_conditions is None:
         initial_conditions = sf.compute_initial_conditions(
             inputs=inputs,
@@ -1007,18 +1020,6 @@ def _setup_ics_and_pfs_for_scrolling(
         # Otherwise, they are taken from initial_conditions, which may have
         # a different (compatible) set of inputs.
         photon_nonconservation_data = setup_photon_cons(inputs=inputs, **kw)
-
-    if (
-        inputs.astro_options.PHOTON_CONS_TYPE == "z-photoncons"
-        and np.amin(all_redshifts) < inputs.astro_params.PHOTONCONS_CALIBRATION_END
-    ):
-        raise ValueError(
-            f"You have passed a redshift (z = {np.amin(all_redshifts)}) that is lower than"
-            "the endpoint of the photon non-conservation correction"
-            f"(astro_params.PHOTONCONS_CALIBRATION_END = {inputs.astro_params.PHOTONCONS_CALIBRATION_END})."
-            "If this behaviour is desired then set astro_params.PHOTONCONS_CALIBRATION_END"
-            f"to a value lower than z = {np.amin(all_redshifts)}."
-        )
 
     perturbed_field = []
     with _progressbar(disable=not progressbar) as _progbar:
